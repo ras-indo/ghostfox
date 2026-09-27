@@ -32,6 +32,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     name: "runtime ${{ matrix.arch }}"
     steps:
+      - uses: actions/checkout@v4
+
       - name: Build ghostcloak-mcp inside ubuntu:24.04 (${{ matrix.arch }})
         run: |
           docker run --rm \

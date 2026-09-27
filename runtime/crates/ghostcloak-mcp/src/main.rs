@@ -1,25 +1,17 @@
 //! ghostcloak-mcp: exposes the browser runtime to AI agents over MCP
 //! (stdio, Streamable HTTP, or both).
+//!
+//! This binary is intentionally thin: all logic lives in the library
+//! crate (`ghostcloak_mcp`) so the same code paths serve stdio, HTTP,
+//! and "both" modes without duplicate module compilation.
 
 use anyhow::Result;
 use clap::Parser;
+use ghostcloak_mcp::config::{CliArgs, Config, ReloadTracker, Transport};
+use ghostcloak_mcp::server::GhostcloakServer;
+use ghostcloak_mcp::{config, http};
 use rmcp::service::serve_server;
 use rmcp::transport::stdio;
-
-mod auth;
-mod captcha;
-mod config;
-mod ddddocr;
-mod geetest;
-mod hcaptcha;
-mod http;
-mod liveview;
-mod ocr;
-mod recording;
-mod server;
-
-use config::{CliArgs, Config, ReloadTracker, Transport};
-use server::GhostcloakServer;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -84,7 +76,7 @@ async fn main() -> Result<()> {
         Config::load()?
     };
 
-    // Apply CLI overrides
+    // Apply CLI overrides (CLI > ENV > FILE > DEFAULT)
     let args = cli.into_args();
     args.apply(&mut cfg);
 
@@ -94,15 +86,9 @@ async fn main() -> Result<()> {
     tracing::info!("transport={}", cfg.server.transport);
 
     match cfg.server.transport {
-        Transport::Stdio => {
-            run_stdio().await;
-        }
-        Transport::Http => {
-            run_http(cfg).await?;
-        }
-        Transport::Both => {
-            run_both(cfg).await?;
-        }
+        Transport::Stdio => run_stdio().await,
+        Transport::Http => run_http(cfg).await?,
+        Transport::Both => run_both(cfg).await?,
     }
 
     Ok(())
@@ -122,9 +108,9 @@ async fn run_http(cfg: Config) -> Result<()> {
     let server = GhostcloakServer::new();
     let mut tracker = ReloadTracker::new(cfg.clone());
 
-    let mut handle = http::start_http_server(&cfg.http, server).await?;
+    let (state, mut handle) = http::start_http_server(&cfg.http, server).await?;
 
-    // Wait for shutdown signal, checking config reload periodically
+    // Wait for shutdown signal, checking config reload periodically.
     let reload_interval = std::time::Duration::from_secs(5);
     loop {
         tokio::select! {
@@ -133,9 +119,15 @@ async fn run_http(cfg: Config) -> Result<()> {
                 break;
             }
             _ = tokio::time::sleep(reload_interval) => {
-                let _ = tracker.check_reload();
-                // API key and allowed_origins hot-reload via ReloadTracker.
-                // Host/port changes require restart (documented).
+                let (reloaded, new_cfg) = tracker.check_reload();
+                if reloaded {
+                    state.apply_reload(&new_cfg.http).await;
+                    tracing::info!(
+                        "HTTP auth config reloaded (api_key={}, allowed_origins={:?})",
+                        !new_cfg.http.api_key.is_empty(),
+                        new_cfg.http.allowed_origins
+                    );
+                }
             }
             result = &mut handle => {
                 match result {
@@ -159,7 +151,7 @@ async fn run_both(cfg: Config) -> Result<()> {
     tracing::info!("starting both stdio + HTTP MCP transports");
 
     // Start HTTP server
-    let mut http_handle = http::start_http_server(&cfg.http, server.clone()).await?;
+    let (state, mut http_handle) = http::start_http_server(&cfg.http, server.clone()).await?;
 
     // Start stdio server in a separate task
     let stdio_server = GhostcloakServer::new();
@@ -182,7 +174,11 @@ async fn run_both(cfg: Config) -> Result<()> {
                 break;
             }
             _ = tokio::time::sleep(reload_interval) => {
-                let _ = tracker.check_reload();
+                let (reloaded, new_cfg) = tracker.check_reload();
+                if reloaded {
+                    state.apply_reload(&new_cfg.http).await;
+                    tracing::info!("HTTP auth config reloaded (both mode)");
+                }
             }
             result = &mut http_handle => {
                 match result {

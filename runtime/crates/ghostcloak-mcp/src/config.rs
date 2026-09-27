@@ -281,15 +281,16 @@ impl ReloadTracker {
         }
     }
 
-    /// Check if config file has changed and is valid. Returns the active
-    /// config (either new or last-known-good).
-    pub fn check_reload(&mut self) -> Config {
+    /// Check if config file has changed and is valid. Returns whether a
+    /// reload happened and the current active config (either new or
+    /// last-known-good).
+    pub fn check_reload(&mut self) -> (bool, Config) {
         let current_modified = std::fs::metadata(&self.path)
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
         if current_modified <= self.last_modified {
-            return self.last_config.clone();
+            return (false, self.last_config.clone());
         }
 
         // File changed — try to reload
@@ -300,16 +301,16 @@ impl ReloadTracker {
                     apply_env(&mut new_cfg);
                     tracing::info!("config reloaded from {}", self.path.display());
                     self.last_config = new_cfg.clone();
-                    new_cfg
+                    (true, new_cfg)
                 }
                 Err(e) => {
                     tracing::error!("invalid config file, keeping last known good: {e}");
-                    self.last_config.clone()
+                    (false, self.last_config.clone())
                 }
             },
             Err(e) => {
                 tracing::error!("failed to read config file, keeping last known good: {e}");
-                self.last_config.clone()
+                (false, self.last_config.clone())
             }
         }
     }
@@ -420,7 +421,8 @@ mod tests {
         )
         .unwrap();
 
-        let new_cfg = tracker.check_reload();
+        let (reloaded, new_cfg) = tracker.check_reload();
+        assert!(reloaded);
         assert_eq!(new_cfg.server.transport, Transport::Http);
         assert_eq!(new_cfg.http.api_key, "test");
     }
@@ -437,7 +439,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(&path, "this is not valid {{{{").unwrap();
 
-        let kept = tracker.check_reload();
+        let (reloaded, kept) = tracker.check_reload();
+        assert!(!reloaded);
         assert_eq!(kept.server.transport, Transport::Stdio);
     }
 

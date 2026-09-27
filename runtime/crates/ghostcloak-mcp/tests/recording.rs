@@ -1,4 +1,4 @@
-#![allow(clippy::all)]
+#![allow(clippy::all, dead_code, unused_variables, unused_mut)]
 use ghostcloak_core::engine::PageSnapshot;
 use ghostcloak_mcp::recording::Recorder;
 use serde_json::json;

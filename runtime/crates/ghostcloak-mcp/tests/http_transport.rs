@@ -1,4 +1,4 @@
-#![allow(clippy::all)]
+#![allow(clippy::all, dead_code, unused_variables, unused_mut)]
 //! Integration tests for the HTTP transport.
 //!
 //! These tests verify:

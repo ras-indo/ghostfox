@@ -8,6 +8,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use subtle::ConstantTimeEq;
+use tokio::sync::RwLock;
 
 /// Shared HTTP auth configuration (cheaply clonable).
 #[derive(Clone)]
@@ -19,6 +20,14 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
+    /// Build from an HTTP config section.
+    pub fn from_config(http: &crate::config::HttpConfig) -> Self {
+        Self {
+            api_key: Arc::new(http.api_key.clone()),
+            allowed_origins: Arc::new(http.allowed_origins.clone()),
+        }
+    }
+
     /// Check if this config requires authentication.
     pub fn is_active(&self) -> bool {
         !self.api_key.is_empty()
@@ -76,10 +85,12 @@ fn validate_origin(headers: &HeaderMap, allowed: &[String]) -> bool {
 
 /// Tower/axum middleware: checks API-key auth + Origin validation.
 pub async fn auth_middleware(
-    State(auth): State<AuthConfig>,
+    State(auth): State<Arc<RwLock<AuthConfig>>>,
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let auth = auth.read().await;
+
     // --- Origin validation ---
     if !validate_origin(req.headers(), &auth.allowed_origins) {
         tracing::warn!("rejected request: invalid Origin");
@@ -95,6 +106,7 @@ pub async fn auth_middleware(
         }
     }
 
+    drop(auth);
     Ok(next.run(req).await)
 }
 

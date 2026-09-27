@@ -777,11 +777,9 @@ bogus = 42
             Cli::default(),
             EnvVars::default(),
         );
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(store.ensure_api_key())
-            .unwrap();
-        let cfg = store.config.read().clone();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store.ensure_api_key()).unwrap();
+        let cfg = rt.block_on(store.config.read()).clone();
         assert!(!cfg.http.api_key.is_empty());
         assert_eq!(cfg.http.api_key.len(), 43);
         // Verify file was updated
@@ -810,11 +808,9 @@ bogus = 42
             Cli::default(),
             env,
         );
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(store.ensure_api_key())
-            .unwrap();
-        let cfg = store.config.read().clone();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(store.ensure_api_key()).unwrap();
+        let cfg = rt.block_on(store.config.read()).clone();
         assert_eq!(cfg.http.api_key, "from-env-key");
         // File unchanged
         let text = fs::read_to_string(&path).unwrap();

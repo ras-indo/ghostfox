@@ -195,8 +195,8 @@ pub fn coco_detect(png: &[u8], targets: &[usize], min_conf: f32) -> Result<Vec<(
     for i in 0..n {
         let x = data[i];
         let y = data[n + i];
-        let bw = data[2 * n + i];
-        let bh = data[3 * n + i];
+        let _bw = data[2 * n + i];
+        let _bh = data[3 * n + i];
         let mut best = 0f32;
         let mut best_cls = 0usize;
         for (k, t) in targets.iter().enumerate() {

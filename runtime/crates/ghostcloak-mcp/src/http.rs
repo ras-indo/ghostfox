@@ -7,8 +7,10 @@ use std::sync::Arc;
 use axum::middleware;
 use axum::Router;
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    session::local::LocalSessionManager,
+    tower::StreamableHttpService,
 };
+use rmcp::transport::StreamableHttpServerConfig;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -35,9 +37,6 @@ pub fn is_non_loopback(addr: &SocketAddr) -> bool {
 }
 
 /// Serve the Streamable HTTP MCP endpoint on the provided listener.
-///
-/// The future resolves when the `CancellationToken` fires (graceful
-/// shutdown) or when an I/O error occurs on the listener.
 pub async fn serve(
     listener: TcpListener,
     store: Arc<ConfigStore>,
@@ -49,9 +48,12 @@ pub async fn serve(
 
     let mcp_service: StreamableHttpService<GhostcloakServer, LocalSessionManager> =
         StreamableHttpService::new(
-            move || -> std::result::Result<GhostcloakServer, rmcp::Error> { Ok(server.clone()) },
+            move || Ok(server.clone()),
             LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default().with_cancellation_token(cancellation.clone()),
+            StreamableHttpServerConfig {
+                cancellation_token: cancellation.clone(),
+                ..Default::default()
+            },
         );
 
     let app = Router::new()

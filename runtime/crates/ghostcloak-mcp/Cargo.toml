@@ -46,6 +46,8 @@ axum.workspace = true
 subtle.workspace = true
 http.workspace = true
 tokio-util.workspace = true
+thiserror.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

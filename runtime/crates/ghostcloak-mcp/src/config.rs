@@ -45,9 +45,18 @@ impl std::str::FromStr for Transport {
 }
 
 /// HTTP server configuration.
+///
+/// All fields carry serde defaults so that a partial `[http]` section in
+/// config.toml (e.g. only `api_key` or only `allowed_origins`) parses
+/// successfully and falls back to secure defaults per field. Without this,
+/// a partial section fails TOML deserialization with "missing field" — and
+/// a hot reload of a config that omits `host`/`port` would silently keep
+/// the last known good config instead of applying the new key/origins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
+    #[serde(default = "default_host")]
     pub host: String,
+    #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
@@ -55,6 +64,14 @@ pub struct HttpConfig {
     pub api_key: String,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+}
+
+fn default_host() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_port() -> u16 {
+    8787
 }
 
 fn default_endpoint() -> String {
@@ -381,7 +398,7 @@ mod tests {
 
     #[test]
     fn default_config_is_stdio() {
-        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = Config::default();
         assert_eq!(cfg.server.transport, Transport::Stdio);
         assert_eq!(cfg.http.host, "127.0.0.1");
@@ -414,7 +431,7 @@ mod tests {
 
     #[test]
     fn cli_precedence_over_env() {
-        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GHOSTFOX_HTTP_PORT", "9000");
         let mut cfg = Config::default();
         apply_env(&mut cfg);
@@ -434,7 +451,7 @@ mod tests {
 
     #[test]
     fn env_overrides_file_default() {
-        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("GHOSTFOX_TRANSPORT", "http");
         std::env::set_var("GHOSTFOX_HTTP_PORT", "9999");
         let mut cfg = Config::default(); // simulates file config
@@ -455,7 +472,7 @@ mod tests {
 
     #[test]
     fn file_reload_detects_change() {
-        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -488,7 +505,7 @@ mod tests {
 
     #[test]
     fn invalid_hot_reload_keeps_previous() {
-        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[server]\ntransport = \"stdio\"").unwrap();

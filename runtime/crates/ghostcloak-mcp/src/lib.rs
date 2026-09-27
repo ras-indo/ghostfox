@@ -15,6 +15,6 @@ mod hcaptcha;
 mod liveview;
 mod ocr;
 pub mod recording;
-mod server;
+pub mod server;
 
 pub use server::GhostcloakServer;

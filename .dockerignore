@@ -1,2 +1,6 @@
+# Only what the image build needs. local-assets/ is staged by the release
+# pipeline (docker job) with the exact release artifacts; keep it available.
 *
 !Dockerfile
+!local-assets/
+!local-assets/**

@@ -642,6 +642,44 @@ camofox-browser, ...):
 announcement) was published by the Ghostfox runtime itself, using a
 session migrated from a Camoufox-lineage browser this way.*
 
+## 9. MCP transports: stdio, HTTP, both (v0.8)
+
+`ghostcloak-mcp` ships three launch modes on ONE binary — same 42 tools,
+same shared state (one trust domain per process):
+
+- **stdio (default)** — unchanged, backward compatible. stdout = MCP
+  messages only; logs go to stderr. Never `println!` to stdout in stdio
+  mode.
+- **http** — `--transport http` (or `GHOSTFOX_TRANSPORT=http`, or
+  `[server] transport = "http"` in config). Serves `/mcp` (default
+  `127.0.0.1:8787/mcp`) via official rmcp `StreamableHttpService`.
+  REQUIRES an API key: `Authorization: Bearer <key>` on every request.
+  Invalid origin → 403. Missing/wrong key → 401 (generic body).
+- **both** — stdio + HTTP together, same `GhostcloakServer` state.
+
+Config precedence: CLI > ENV > FILE > DEFAULT. Hot reload (5s poll) covers
+`api_key` + `allowed_origins`; socket fields require restart.
+
+Security review checklist (from the release pipeline):
+
+1. Can unauthenticated clients call tools? — NO, every `/mcp` request is
+   authenticated (401 without valid key).
+2. Invalid Origin? — 403.
+3. API key in logs/URLs? — never logged; constant-time compare (`subtle`).
+4. Config reload disabling auth? — invalid reload keeps last known-good
+   config; auth fields cannot be disabled by malformed TOML.
+5. Default bind — `127.0.0.1`. `0.0.0.0` logs a warning, auth still
+   enforced.
+6. TLS? — API key is authentication, NOT encryption. Remote deployments go
+   behind an HTTPS reverse proxy (nginx/Caddy/Traefik/Cloudflare Tunnel).
+
+**No-local-build rule (release pipeline).** Heavy verification (compile,
+test, clippy, fmt, docker, packaging) happens in GitHub Actions only — never
+`cargo build`/`cargo test` on a dev box as source of truth. Commit → push →
+read the Actions log → fix → push again. Local machine is for editing,
+inspection, and git only. Release gate must be green in Actions before any
+GitHub Release / GHCR push.
+
 ---
 
 *This playbook is maintained from real runs. When you find a new wall and

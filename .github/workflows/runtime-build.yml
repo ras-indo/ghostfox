@@ -64,7 +64,8 @@ jobs:
           sudo chown "$(id -u):$(id -g)" /tmp/gf-out/ghostcloak-mcp
           # Rename with arch suffix so both x86_64 and arm64 coexist in release
           if [ -n "${{ matrix.suffix }}" ]; then
-            cp /tmp/gf-out/ghostcloak-mcp "/tmp/gf-out/ghostcloak-mcp${{ matrix.suffix }}"
+            sudo cp /tmp/gf-out/ghostcloak-mcp "/tmp/gf-out/ghostcloak-mcp${{ matrix.suffix }}"
+            sudo chown "$(id -u):$(id -g)" "/tmp/gf-out/ghostcloak-mcp${{ matrix.suffix }}"
             ls -la "/tmp/gf-out/ghostcloak-mcp${{ matrix.suffix }}"
           else
             ls -la /tmp/gf-out/ghostcloak-mcp

@@ -9,7 +9,7 @@ description = "Ghostfox — the agent-native stealth browser with 8 captcha solv
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT OR Apache-2.0" }
-authors = [{ name = "autokeren" }]
+authors = [{ name = "ras-indo" }]
 keywords = ["browser", "stealth", "anti-detect", "mcp", "ai-agents", "scraping", "captcha", "captcha-solver", "geetest", "hcaptcha", "turnstile", "debugging", "console-capture"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -17,7 +17,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/autokeren/ghostfox"
+Repository = "https://github.com/ras-indo/ghostfox"
 
 [tool.setuptools.packages.find]
 include = ["ghostfox*"]

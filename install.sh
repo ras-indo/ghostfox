@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ghostfox one-command installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/autokeren/ghostfox/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ras-indo/ghostfox/main/install.sh | bash
 #
 # What it does:
 #   1. Downloads the prebuilt Ghostfox engine (Linux x86_64) from Releases
@@ -12,7 +12,8 @@
 # Layout: ~/.ghostfox/{engine,mcp}
 set -euo pipefail
 
-REPO="autokeren/ghostfox"
+# Repository override for installs from a fork (e.g. GHOSTFOX_REPO=owner/name).
+REPO="${GHOSTFOX_REPO:-ras-indo/ghostfox}"
 DEST="${GHOSTFOX_HOME_ROOT:-$HOME/.ghostfox}"
 OS="$(uname -s)"
 ARCH="$(uname -m)"

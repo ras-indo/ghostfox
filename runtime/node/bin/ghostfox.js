@@ -16,7 +16,7 @@ const path = require("path");
 const https = require("https");
 const zlib = require("zlib");
 
-const REPO = "autokeren/ghostfox";
+const REPO = process.env.GHOSTFOX_REPO || "ras-indo/ghostfox";
 const ROOT = process.env.GHOSTFOX_ROOT || path.join(os.homedir(), ".ghostfox");
 const ENGINE = path.join(ROOT, "engine");
 const MCP_BIN = path.join(ROOT, "mcp", "ghostcloak-mcp");
@@ -155,7 +155,7 @@ usage:
   ghostfox version    print versions
 
 repo: https://github.com/${REPO}
-docs: https://autokeren.github.io/ghostfox/
+docs: https://ras-indo.github.io/ghostfox/
 `);
       process.exit(cmd === "help" ? 0 : 1);
   }

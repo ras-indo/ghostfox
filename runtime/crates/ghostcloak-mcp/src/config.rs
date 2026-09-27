@@ -41,7 +41,9 @@ impl std::str::FromStr for Transport {
             "stdio" => Ok(Self::Stdio),
             "http" => Ok(Self::Http),
             "both" => Ok(Self::Both),
-            _ => Err(format!("invalid transport '{s}': expected stdio, http, or both")),
+            _ => Err(format!(
+                "invalid transport '{s}': expected stdio, http, or both"
+            )),
         }
     }
 }
@@ -129,9 +131,7 @@ fn config_path() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home)
-        .join(".ghostfox")
-        .join("config.toml")
+    PathBuf::from(home).join(".ghostfox").join("config.toml")
 }
 
 fn load_file_config() -> Result<Config> {
@@ -141,8 +141,7 @@ fn load_file_config() -> Result<Config> {
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read config {}", path.display()))?;
-    toml::from_str(&content)
-        .with_context(|| format!("failed to parse config {}", path.display()))
+    toml::from_str(&content).with_context(|| format!("failed to parse config {}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -230,10 +229,8 @@ pub fn generate_api_key() -> String {
 /// If transport needs HTTP and the API key is empty, generate one and
 /// persist it to the config file. Returns the (possibly new) config.
 pub fn ensure_api_key(mut cfg: Config) -> Result<Config> {
-    if matches!(
-        cfg.server.transport,
-        Transport::Http | Transport::Both
-    ) && cfg.http.api_key.is_empty()
+    if matches!(cfg.server.transport, Transport::Http | Transport::Both)
+        && cfg.http.api_key.is_empty()
     {
         cfg.http.api_key = generate_api_key();
         persist_config(&cfg)?;
@@ -253,10 +250,7 @@ fn persist_config(cfg: &Config) -> Result<()> {
     let dir = path
         .parent()
         .context("config path has no parent directory")?;
-    let tmp = dir.join(format!(
-        ".config.toml.{}",
-        std::process::id()
-    ));
+    let tmp = dir.join(format!(".config.toml.{}", std::process::id()));
     std::fs::write(&tmp, &content).context("failed to write temp config")?;
 
     // Set 0600 on Unix
@@ -320,16 +314,12 @@ impl ReloadTracker {
                     new_cfg
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "invalid config file, keeping last known good: {e}"
-                    );
+                    tracing::error!("invalid config file, keeping last known good: {e}");
                     self.last_config.clone()
                 }
             },
             Err(e) => {
-                tracing::error!(
-                    "failed to read config file, keeping last known good: {e}"
-                );
+                tracing::error!("failed to read config file, keeping last known good: {e}");
                 self.last_config.clone()
             }
         }
@@ -415,7 +405,9 @@ mod tests {
         let key = generate_api_key();
         assert!(key.len() >= 40, "key too short: {}", key.len());
         // base64url chars: A-Z, a-z, 0-9, -, _
-        assert!(key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]
@@ -433,7 +425,11 @@ mod tests {
         // Modify
         let mut tracker = ReloadTracker::new(cfg);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        std::fs::write(&path, "[server]\ntransport = \"http\"\n\n[http]\napi_key = \"test\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[server]\ntransport = \"http\"\n\n[http]\napi_key = \"test\"\n",
+        )
+        .unwrap();
 
         let new_cfg = tracker.check_reload();
         assert_eq!(new_cfg.server.transport, Transport::Http);

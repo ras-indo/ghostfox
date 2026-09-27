@@ -32,10 +32,14 @@ fn start_server_http(port: u16, api_key: &str) -> Child {
     let binary = env!("CARGO_BIN_EXE_ghostcloak-mcp");
     Command::new(binary)
         .args([
-            "--transport", "http",
-            "--http-port", &port.to_string(),
-            "--http-host", "127.0.0.1",
-            "--http-api-key", api_key,
+            "--transport",
+            "http",
+            "--http-port",
+            &port.to_string(),
+            "--http-host",
+            "127.0.0.1",
+            "--http-api-key",
+            api_key,
         ])
         .env("RUST_LOG", "off")
         .stdin(Stdio::null())
@@ -91,12 +95,7 @@ fn initialize_stdio(child: &mut Child) {
     stdin.flush().expect("flush");
 }
 
-async fn http_request(
-    port: u16,
-    method: &str,
-    params: Value,
-    api_key: &str,
-) -> reqwest::Response {
+async fn http_request(port: u16, method: &str, params: Value, api_key: &str) -> reqwest::Response {
     let client = reqwest::Client::new();
     let body = json!({
         "jsonrpc": "2.0",
@@ -196,7 +195,11 @@ fn stdio_contract_lists_identity_tools() {
     assert!(names.contains(&"identity_generate"));
     assert!(names.contains(&"identity_audit"));
     // Total should be 43+ tools
-    assert!(names.len() >= 40, "expected >= 40 tools, got {}", names.len());
+    assert!(
+        names.len() >= 40,
+        "expected >= 40 tools, got {}",
+        names.len()
+    );
 
     child.kill().ok();
 }

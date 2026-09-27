@@ -44,10 +44,7 @@ async fn healthz() -> impl IntoResponse {
 /// MCP handler: delegates to StreamableHttpService::handle().
 ///
 /// Converts between axum body types and rmcp body types.
-async fn mcp_handler(
-    State(state): State<AppState>,
-    req: Request<Body>,
-) -> impl IntoResponse {
+async fn mcp_handler(State(state): State<AppState>, req: Request<Body>) -> impl IntoResponse {
     // Convert axum Request<Body> to rmcp-compatible Request
     let (parts, body) = req.into_parts();
     let body = body.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
@@ -57,14 +54,13 @@ async fn mcp_handler(
     // GhostcloakServer is Clone with Arc-based internal state, so cloning
     // is cheap and shares the same session storage.
     let server = state.server.clone();
-    let service =
-        rmcp::transport::streamable_http_server::tower::StreamableHttpService::new(
-            move || Ok(server.clone()),
-            Arc::new(
-                rmcp::transport::streamable_http_server::session::local::LocalSessionManager::new(),
-            ),
-            rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig::default(),
-        );
+    let service = rmcp::transport::streamable_http_server::tower::StreamableHttpService::new(
+        move || Ok(server.clone()),
+        Arc::new(
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::new(),
+        ),
+        rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig::default(),
+    );
 
     // Handle the request via the MCP service
     let response = service.handle(rmcp_req).await;

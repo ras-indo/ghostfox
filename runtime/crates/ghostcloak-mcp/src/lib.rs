@@ -2,7 +2,7 @@
 
 pub mod auth;
 pub mod config;
-pub mod http;
-pub mod recording;
-pub mod ocr;
 pub mod geetest;
+pub mod http;
+pub mod ocr;
+pub mod recording;

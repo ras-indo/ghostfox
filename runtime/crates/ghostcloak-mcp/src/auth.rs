@@ -115,10 +115,7 @@ fn extract_bearer_token(headers: &HeaderMap) -> String {
 /// Build the 401 Unauthorized response with WWW-Authenticate header.
 pub fn unauthorized_response() -> Response {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "www-authenticate",
-        HeaderValue::from_static("Bearer"),
-    );
+    headers.insert("www-authenticate", HeaderValue::from_static("Bearer"));
     (
         StatusCode::UNAUTHORIZED,
         headers,

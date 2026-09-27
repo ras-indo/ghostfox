@@ -167,7 +167,10 @@ async fn run_both(cfg: Config) -> Result<()> {
         let service = serve_server(stdio_server, stdio())
             .await
             .expect("failed to start stdio MCP server in both mode");
-        service.waiting().await.expect("stdio server error in both mode");
+        service
+            .waiting()
+            .await
+            .expect("stdio server error in both mode");
     });
 
     // Wait for shutdown

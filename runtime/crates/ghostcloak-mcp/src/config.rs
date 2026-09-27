@@ -373,13 +373,15 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    // Serialise tests that mutate process-wide env vars to avoid races.
-    // All env-using tests must lock ENV_LOCK before calling set_var.
+    // Serialise ALL config tests to prevent any cross-test interference:
+    // env-var races (process-wide), file I/O races (tempdir), and
+    // potential metadata caching issues on some platforms.
     use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static CONFIG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn default_config_is_stdio() {
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
         let cfg = Config::default();
         assert_eq!(cfg.server.transport, Transport::Stdio);
         assert_eq!(cfg.http.host, "127.0.0.1");
@@ -412,7 +414,7 @@ mod tests {
 
     #[test]
     fn cli_precedence_over_env() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
         std::env::set_var("GHOSTFOX_HTTP_PORT", "9000");
         let mut cfg = Config::default();
         apply_env(&mut cfg);
@@ -432,7 +434,7 @@ mod tests {
 
     #[test]
     fn env_overrides_file_default() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
         std::env::set_var("GHOSTFOX_TRANSPORT", "http");
         std::env::set_var("GHOSTFOX_HTTP_PORT", "9999");
         let mut cfg = Config::default(); // simulates file config
@@ -453,7 +455,7 @@ mod tests {
 
     #[test]
     fn file_reload_detects_change() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -486,7 +488,7 @@ mod tests {
 
     #[test]
     fn invalid_hot_reload_keeps_previous() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[server]\ntransport = \"stdio\"").unwrap();

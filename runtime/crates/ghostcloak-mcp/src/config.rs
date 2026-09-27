@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use rand::TryRngCore;
 use rand::rngs::OsRng;
+use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
 
 /// Canonical transport mode.
@@ -222,7 +222,9 @@ impl CliArgs {
 /// without padding.
 pub fn generate_api_key() -> String {
     let mut bytes = [0u8; 32];
-    OsRng.try_fill_bytes(&mut bytes).expect("failed to generate random bytes");
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .expect("failed to generate random bytes");
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }

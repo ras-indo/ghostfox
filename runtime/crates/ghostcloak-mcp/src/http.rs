@@ -47,7 +47,7 @@ async fn healthz() -> impl IntoResponse {
 async fn mcp_handler(State(state): State<AppState>, req: Request<Body>) -> impl IntoResponse {
     // Convert axum Request<Body> to rmcp-compatible Request
     let (parts, body) = req.into_parts();
-    let body = body.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let body = body.map_err(|e| std::io::Error::other(e));
     let rmcp_req = Request::from_parts(parts, body);
 
     // Create the MCP service for this request.

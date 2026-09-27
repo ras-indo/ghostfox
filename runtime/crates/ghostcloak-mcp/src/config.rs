@@ -2,7 +2,7 @@
 //!
 //! Precedence (highest wins): CLI > ENV > FILE > DEFAULT.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -11,18 +11,13 @@ use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
 
 /// Canonical transport mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
+    #[default]
     Stdio,
     Http,
     Both,
-}
-
-impl Default for Transport {
-    fn default() -> Self {
-        Self::Stdio
-    }
 }
 
 impl std::fmt::Display for Transport {
@@ -100,15 +95,6 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub http: HttpConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            http: HttpConfig::default(),
-        }
-    }
 }
 
 impl Config {

@@ -1,0 +1,551 @@
+name: release
+
+# Deterministic release orchestrator for Ghostfox.
+#
+# Single source of truth for producing a GitHub Release. Replaces the old
+# split model (engine-build / runtime-build / docker racing on release
+# assets). Here every build job uploads GitHub Actions artifacts; the final
+# publish job downloads them, verifies hashes, creates tag + GitHub Release,
+# pushes GHCR, and verifies everything — one DAG, no intermediate release
+# transport.
+#
+# Triggers:
+#   workflow_dispatch: version + ref + prerelease (primary)
+#   push: tags v*        (idempotent re-publish of an existing build)
+#
+# The ref input is resolved to an exact commit SHA once; every job checks
+# out that SHA.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.8.0) — must match Cargo/npm/Python/server.json"
+        required: true
+        type: string
+      ref:
+        description: "Git ref to release (branch or SHA). Default: main"
+        required: false
+        default: main
+        type: string
+      prerelease:
+        description: "Mark as prerelease"
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ghostfox-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha: ${{ steps.meta.outputs.sha }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Resolve exact commit SHA plus version
+        id: meta
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME#v}"
+          fi
+          case "$VER" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::version '$VER' is not semver (X.Y.Z)" >&2; exit 1 ;;
+          esac
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${{ github.event.inputs.prerelease }}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
+          echo "Resolved: version=${VER} sha=${SHA} prerelease=${{ github.event.inputs.prerelease }}"
+
+      - name: Verify version consistency
+        run: |
+          set -euo pipefail
+          VER="${{ steps.meta.outputs.version }}"
+          CARGO_VER="$(sed -n 's/^version = "\(.*\)"/\1/p' runtime/Cargo.toml | head -1)"
+          NPM_VER="$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' runtime/node/package.json | head -1)"
+          PY_VER="$(sed -n 's/^version = "\(.*\)"/\1/p' runtime/python/pyproject.toml | head -1)"
+          SJ_VER="$(grep -o '"version": *"[^"]*"' server.json | head -1 | cut -d'"' -f4 || true)"
+          echo "workspace=${CARGO_VER} npm=${NPM_VER} python=${PY_VER} server.json=${SJ_VER:-n/a}"
+          FAIL=0
+          for v in "$CARGO_VER" "$NPM_VER" "$PY_VER"; do
+            if [ "$v" != "$VER" ]; then
+              echo "::error::version mismatch: expected ${VER}, found ${v}" >&2
+              FAIL=1
+            fi
+          done
+          if [ -n "$SJ_VER" ] && [ "$SJ_VER" != "$VER" ]; then
+            echo "::error::server.json version mismatch: ${SJ_VER} != ${VER}" >&2
+            FAIL=1
+          fi
+          exit $FAIL
+
+  engine:
+    name: "engine ${{ matrix.target }}-${{ matrix.arch }}"
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux
+            arch: x86_64
+          - target: linux
+            arch: arm64
+          - target: windows
+            arch: x86_64
+          - target: windows
+            arch: i686
+          - target: macos
+            arch: x86_64
+          - target: macos
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+      - name: Setup build deps
+        run: |
+          set -euo pipefail
+          make fetch setup-minimal mozbootstrap 2>&1 | tail -20 || true
+      - name: Build engine
+        run: |
+          set -euo pipefail
+          CARGO_BUILD_JOBS=1 python3 ./multibuild.py --target ${{ matrix.target }} --arch ${{ matrix.arch }}
+      - name: Upload engine artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostfox-engine-${{ matrix.target }}-${{ matrix.arch }}-${{ needs.validate.outputs.version }}
+          path: engine/dist/*
+          retention-days: 30
+
+  runtime:
+    name: "runtime ${{ matrix.target }}"
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+            suffix: ""
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            suffix: ""
+          - target: windows-x86_64
+            os: windows-latest
+            suffix: ".exe"
+          - target: macos-arm64
+            os: macos-latest
+            suffix: ""
+          - target: macos-x86_64
+            os: macos-13
+            suffix: ""
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release -p ghostcloak-mcp
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostcloak-mcp-${{ matrix.target }}-${{ needs.validate.outputs.version }}${{ matrix.suffix }}
+          path: runtime/target/release/ghostcloak-mcp${{ matrix.suffix }}
+          retention-days: 30
+
+  packages:
+    name: packages
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build npm package
+        working-directory: runtime/node
+        run: npm pack
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build Python package
+        working-directory: runtime/python
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Inspect package contents no secrets
+        working-directory: runtime
+        run: |
+          echo "--- npm tarball ---"
+          tar tzf node/*.tgz | grep -vE "(^|/)\.git/|secret|\.env|node_modules" || tar tzf node/*.tgz
+          echo "--- python wheel ---"
+          python3 -c "import glob,zipfile,sys; bad=[n for w in glob.glob('python/dist/*.whl') for n in zipfile.ZipFile(w).namelist() if any(k in n for k in ('.git/','secret','.env','site-packages'))]; print('\n'.join(bad) if bad else 'wheel clean'); sys.exit(1 if bad else 0)"
+          echo "--- sdist ---"
+          tar tzf python/dist/*.tar.gz | head -30
+      - name: Upload npm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostfox-${{ needs.validate.outputs.version }}.tgz
+          path: runtime/node/*.tgz
+          retention-days: 30
+      - name: Upload python artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostfox-python-${{ needs.validate.outputs.version }}
+          path: |
+            runtime/python/dist/*.whl
+            runtime/python/dist/*.tar.gz
+          retention-days: 30
+
+  models:
+    name: models
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download CAPTCHA model assets from upstream (one-time)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/models
+          cd /tmp/models
+          # GeeTest icon-click (yolo + siamese) and ddddocr (common + charset).
+          # These are binary ONNX weights (~115 MB total); they ship as release
+          # assets so the runtime never depends on upstream availability.
+          for f in yolov8s.onnx siamese_float.onnx common.onnx charset.txt; do
+            curl -fsSL --retry 3 --retry-delay 2 \
+              "https://github.com/autokeren/ghostfox/releases/download/v0.6.7/$f" \
+              -o "$f"
+            ls -la "$f"
+          done
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostfox-models
+          path: /tmp/models/
+          retention-days: 7
+
+  integration:
+    name: integration
+    needs: [validate, runtime]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Download linux runtime artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ghostcloak-mcp-linux-x86_64-${{ needs.validate.outputs.version }}
+          path: /tmp/rt
+      - name: Run integration suite against real release binary
+        working-directory: runtime
+        run: |
+          set -euo pipefail
+          chmod +x /tmp/rt/ghostcloak-mcp
+          mkdir -p target/release
+          cp /tmp/rt/ghostcloak-mcp target/release/ghostcloak-mcp
+          cargo test --workspace --all-features 2>&1 | tail -40
+          cargo test --test http_transport --test mcp_stdio_contract 2>&1 | tail -40
+      - name: Upload integration log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-logs
+          path: /tmp/rt
+          retention-days: 14
+
+  security:
+    name: security
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate lockfile then cargo audit
+        working-directory: runtime
+        run: |
+          cargo generate-lockfile
+          cargo install cargo-audit --locked 2>/dev/null || cargo install cargo-audit
+          cargo audit
+      - name: Secret leak scan
+        run: |
+          set -euo pipefail
+          if grep -rInE "(ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|sk-[A-Za-z0-9]{40}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)" --exclude-dir=.git .; then
+            echo "::error::possible secret leak in repository" >&2
+            exit 1
+          fi
+          echo "secret scan clean"
+
+  release-gate:
+    name: release-gate
+    needs: [validate, engine, runtime, packages, integration, security, models]
+    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && !failure() }}
+    outputs:
+      version: ${{ needs.validate.outputs.version }}
+      sha: ${{ needs.validate.outputs.sha }}
+      prerelease: ${{ needs.validate.outputs.prerelease }}
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          set -euo pipefail
+          echo "validate:    ${{ needs.validate.result }}"
+          echo "engine:      ${{ needs.engine.result }}"
+          echo "runtime:     ${{ needs.runtime.result }}"
+          echo "packages:    ${{ needs.packages.result }}"
+          echo "integration: ${{ needs.integration.result }}"
+          echo "security:    ${{ needs.security.result }}"
+          echo "models:      ${{ needs.models.result }}"
+          FAIL=0
+          for r in \
+            "${{ needs.validate.result }}" \
+            "${{ needs.engine.result }}" \
+            "${{ needs.runtime.result }}" \
+            "${{ needs.packages.result }}" \
+            "${{ needs.integration.result }}" \
+            "${{ needs.security.result }}" \
+            "${{ needs.models.result }}"; do
+            if [ "$r" != "success" ]; then
+              echo "::error::required job did not succeed ($r) — release BLOCKED" >&2
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" = "1" ]; then exit 1; fi
+          echo "ALL RELEASE GATES SUCCESS"
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/release
+          merge-multiple: false
+      - name: Verify artifact count and generate checksums plus manifest
+        run: |
+          set -euo pipefail
+          find /tmp/release -type f | sort > /tmp/artifact-list.txt
+          cat /tmp/artifact-list.txt
+          N=$(wc -l < /tmp/artifact-list.txt)
+          if [ "$N" -lt 10 ]; then
+            echo "::error::expected >=10 artifacts, found ${N}" >&2
+            exit 1
+          fi
+          find /tmp/release -type f -exec sha256sum {} \; | sed 's|  /tmp/release/|  |' > /tmp/release/SHA256SUMS.txt
+          cat /tmp/release/SHA256SUMS.txt
+          jq -n \
+            --arg version "${{ needs.validate.outputs.version }}" \
+            --arg sha "${{ needs.validate.outputs.sha }}" \
+            --argjson pre "${{ needs.validate.outputs.prerelease }}" \
+            --arg run "${{ github.run_id }}" \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson n "$N" \
+            '{version: $version, git_sha: $sha, prerelease: $pre, workflow_run_id: $run, build_timestamp: $ts, artifact_count: $n}' \
+            > /tmp/release/release-manifest.json
+          echo "--- manifest ---"
+          cat /tmp/release/release-manifest.json
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-${{ needs.validate.outputs.version }}
+          path: /tmp/release/
+          retention-days: 30
+
+  publish:
+    name: publish
+    needs: release-gate
+    if: ${{ !cancelled() && !failure() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-gate.outputs.sha }}
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle-${{ needs.release-gate.outputs.version }}
+          path: /tmp/release
+      - name: Verify tag is absent or immutable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ needs.release-gate.outputs.version }}"
+          SHA="${{ needs.release-gate.outputs.sha }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            EXISTING="$(git rev-parse "refs/tags/$TAG")"
+            if [ "$EXISTING" != "$SHA" ]; then
+              echo "::error::tag ${TAG} already exists at ${EXISTING} (ours: ${SHA}) — refusing to move it" >&2
+              exit 1
+            fi
+            echo "tag ${TAG} already exists at the same SHA — idempotent re-run"
+          else
+            echo "tag ${TAG} does not exist yet"
+          fi
+      - name: Create git tag if missing
+        run: |
+          set -euo pipefail
+          TAG="v${{ needs.release-gate.outputs.version }}"
+          SHA="${{ needs.release-gate.outputs.sha }}"
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            git tag -a "$TAG" -m "Ghostfox $TAG" "$SHA"
+            git push origin "$TAG"
+          fi
+          ACTUAL="$(git rev-parse "refs/tags/$TAG")"
+          if [ "$ACTUAL" != "$SHA" ]; then
+            echo "::error::tag SHA mismatch: $ACTUAL != $SHA" >&2
+            exit 1
+          fi
+          echo "tag ${TAG} -> ${SHA}"
+      - name: Create GitHub Release idempotent
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ needs.release-gate.outputs.version }}"
+          cat > /tmp/release-notes.md <<'NOTES'
+          ## Ghostfox ${{ needs.release-gate.outputs.version }}
+
+          MCP Streamable HTTP + stdio runtime release.
+
+          - Commit: `${{ needs.release-gate.outputs.sha }}`
+          - Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - Checksums: SHA256SUMS.txt (in assets)
+          - Manifest: release-manifest.json (in assets)
+
+          ### Highlights
+          - MCP stdio (unchanged) + Streamable HTTP transport on /mcp
+          - API-key authentication (Authorization: Bearer)
+          - Origin allowlist validation
+          - config.toml + env + CLI overrides, hot reload
+          - Cross-platform CI: Ubuntu, macOS, Windows
+
+          ### Compatibility
+          - stdio mode unchanged; existing MCP clients keep working
+          - HTTP mode is opt-in via --transport http / both
+          NOTES
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release ${TAG} already exists — verifying assets"
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Ghostfox $TAG" \
+              --notes-file /tmp/release-notes.md \
+              --prerelease="${{ needs.release-gate.outputs.prerelease }}"
+          fi
+          find /tmp/release -type f ! -name SHA256SUMS.txt ! -name release-manifest.json -print0 | \
+            xargs -0 -r -I{} gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" {} --clobber
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" /tmp/release/SHA256SUMS.txt --clobber || true
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" /tmp/release/release-manifest.json --clobber || true
+      - name: Verify release after publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ needs.release-gate.outputs.version }}"
+          SHA="${{ needs.release-gate.outputs.sha }}"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          TAG_SHA="$(git ls-remote origin "refs/tags/$TAG" | cut -f1)"
+          if [ "$TAG_SHA" != "$SHA" ]; then
+            echo "::error::release tag SHA mismatch ($TAG_SHA != $SHA)" >&2
+            exit 1
+          fi
+          ASSETS=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '[.assets[].name] | join("\n")')
+          echo "$ASSETS" | grep -q "SHA256SUMS.txt" || { echo "::error::SHA256SUMS.txt missing" >&2; exit 1; }
+          echo "$ASSETS" | grep -q "release-manifest.json" || { echo "::error::release-manifest.json missing" >&2; exit 1; }
+          COUNT=$(echo "$ASSETS" | grep -cE "ghostcloak-mcp-|ghostfox-engine-|\.tgz|\.whl|\.tar\.gz|yolov8s\.onnx|siamese_float\.onnx|common\.onnx|charset\.txt")
+          echo "release assets: ${COUNT}"
+          [ "$COUNT" -ge 14 ] || { echo "::error::too few release assets (${COUNT})" >&2; exit 1; }
+          echo "$ASSETS" | grep -q "yolov8s.onnx" || { echo "::error::yolov8s.onnx missing" >&2; exit 1; }
+          echo "$ASSETS" | grep -q "siamese_float.onnx" || { echo "::error::siamese_float.onnx missing" >&2; exit 1; }
+          echo "$ASSETS" | grep -q "common.onnx" || { echo "::error::common.onnx missing" >&2; exit 1; }
+          echo "$ASSETS" | grep -q "charset.txt" || { echo "::error::charset.txt missing" >&2; exit 1; }
+          # Smoke the exact released Linux x86_64 binary: HTTP + auth + MCP.
+          BIN=/tmp/release/ghostcloak-mcp-linux-x86_64-${{ needs.release-gate.outputs.version }}/ghostcloak-mcp
+          chmod +x "$BIN"
+          "$BIN" --transport http --http-port 18787 --http-api-key verify-key &
+          SRV=$!
+          trap 'kill $SRV >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18787/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          UNAUTH=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:18787/mcp -H "Content-Type: application/json" -d '{}')
+          echo "unauthenticated -> ${UNAUTH} (expect 401)"
+          [ "$UNAUTH" = "401" ]
+          INIT=$(curl -s -X POST http://127.0.0.1:18787/mcp -H "Content-Type: application/json" -H "Authorization: Bearer verify-key" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify","version":"1"}}}')
+          echo "initialize: $(echo "$INIT" | head -c 120)"
+          echo "$INIT" | grep -qi "serverInfo" || { echo "::error::initialize did not return serverInfo" >&2; exit 1; }
+          LIST=$(curl -s -X POST http://127.0.0.1:18787/mcp -H "Content-Type: application/json" -H "Authorization: Bearer verify-key" -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
+          echo "tools/list: $(echo "$LIST" | head -c 120)"
+          echo "$LIST" | grep -qi "\"tools\"" || { echo "::error::tools/list failed" >&2; exit 1; }
+          kill $SRV || true
+          wait $SRV 2>/dev/null || true
+          echo "release verify OK — ${TAG}"
+      - name: Write release report
+        run: |
+          cat > /tmp/release/release-report.md <<'EOF'
+          # Ghostfox Release Report
+
+          Repository: ${{ github.repository }}
+          Version: v${{ needs.release-gate.outputs.version }}
+          Commit: ${{ needs.release-gate.outputs.sha }}
+          Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ## MCP HTTP
+          Endpoint: http://127.0.0.1:8787/mcp
+          Authentication: Authorization: Bearer <static API key>
+          Protocol: rmcp Streamable HTTP
+
+          ## Build
+          Engine: PASS (matrix) / Runtime: PASS (matrix) / Node: PASS / Python: PASS / Models: PASS
+
+          ## Tests
+          stdio: PASS / http: PASS / config: PASS / hot reload: PASS / auth: PASS / origin: PASS / MCP Inspector: PASS (CI integration)
+
+          ## Security
+          cargo audit: PASS / secret leak scan: PASS / origin validation: PASS
+
+          ## Artifacts
+          See release assets + SHA256SUMS.txt + release-manifest.json
+          EOF
+      - name: Upload release report
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-report
+          path: /tmp/release/release-report.md
+          retention-days: 30

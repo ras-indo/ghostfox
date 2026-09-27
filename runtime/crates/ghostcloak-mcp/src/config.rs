@@ -2,7 +2,7 @@
 //!
 //! Precedence (highest wins): CLI > ENV > FILE > DEFAULT.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};

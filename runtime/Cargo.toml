@@ -27,7 +27,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chromiumoxide = { version = "0.9", default-features = false }
-rmcp = { version = "0.3", features = ["server", "transport-io", "macros", "schemars"] }
+rmcp = { version = "0.3", features = ["server", "transport-io", "macros", "schemars", "transport-worker"] }
 futures = "0.3"
 async-trait = "0.1"
 rand = "0.9"
@@ -45,6 +45,12 @@ parking_lot = "0.12"
 command-fds = "0.3"
 os_pipe = "1"
 libc = "0.2"
+axum = "0.8"
+uuid = { version = "1", features = ["v4"] }
+subtle = "2"
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
 
 [profile.release]
 lto = "fat"

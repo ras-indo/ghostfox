@@ -99,10 +99,35 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
         "session_evidence",
         "captcha_solve",
         "page_fill",
+        "page_geetest_click",
+        "page_geetest_slide",
+        "page_captcha_rotate",
+        "page_captcha_ocr",
+        "page_ocr",
+        "page_vision",
+        "page_console",
+        "page_errors",
+        "page_network_start",
+        "page_network_read",
+        "page_network_body",
+        "page_contrast",
+        "page_pixels",
+        "page_match_image",
+        "page_move_to",
+        "page_drag",
+        "page_hcaptcha",
+        "page_dismiss_modal",
+        "page_init_script",
+        "page_comment",
+        "session_me",
+        "session_pages",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }
-    assert_eq!(names.len(), 19, "tools: {names:?}");
+    // Guard against accidental tool loss: this is the exact count currently
+    // exposed by GhostcloakServer. If a tool is ever removed (or added),
+    // update this list deliberately — never silently drop tools.
+    assert_eq!(names.len(), 42, "tools: {names:?}");
 
     let generated = request(
         &mut child,

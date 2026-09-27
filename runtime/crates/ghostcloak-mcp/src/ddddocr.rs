@@ -39,7 +39,10 @@ async fn download(url: &str, to: &PathBuf) -> Result<()> {
     let resp = reqwest::get(url)
         .await
         .map_err(|e| anyhow!("model download failed ({url}): {e}"))?;
-    let bytes = resp.bytes().await.map_err(|e| anyhow!("read failed: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| anyhow!("read failed: {e}"))?;
     tokio::fs::write(&tmp, &bytes).await?;
     tokio::fs::rename(&tmp, to).await?;
     Ok(())
@@ -77,7 +80,10 @@ async fn engine() -> Result<&'static DdddOcr> {
         .commit_from_file(&model_path)
         .context("loading ddddocr common.onnx")?;
     let charset_text = std::fs::read_to_string(&charset_path).context("reading charset")?;
-    let charset: Vec<char> = charset_text.lines().map(|l| l.chars().next().unwrap_or(' ')).collect();
+    let charset: Vec<char> = charset_text
+        .lines()
+        .map(|l| l.chars().next().unwrap_or(' '))
+        .collect();
     Ok(ENGINE.get_or_init(|| DdddOcr {
         session: std::sync::Mutex::new(session),
         charset,
@@ -120,7 +126,6 @@ pub async fn classify_png(png: &[u8]) -> Result<String> {
         shape.get(2).copied().unwrap_or(0) as usize,
     );
 
-
     // CTC greedy decode
     let mut prev: Option<usize> = None;
     let mut out = String::new();
@@ -147,4 +152,3 @@ pub async fn classify_png(png: &[u8]) -> Result<String> {
     }
     Ok(out)
 }
-

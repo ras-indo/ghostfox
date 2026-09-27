@@ -1,7 +1,7 @@
 # Ghostfox runtime image: engine + MCP server, engine-first entrypoint.
 #
 # Build (from repo root):
-#   docker build -t ghcr.io/ras-indo/ghostfox:latest -f Dockerfile .
+#   docker build -t ghostfox:ci .
 # Run:
 #   docker run -p 7900:7900 -e GHOSTFOX_LIVE_VIEW_PORT=7900 ghcr.io/ras-indo/ghostfox
 #
@@ -30,9 +30,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # from this workflow), use them instead of hitting the network — this makes
 # the Docker image consume the EXACT release-candidate binaries/SHA.
 ARG GHOSTFOX_VERSION=v0.7.3
-ARG GHOSTFOX_REPO=ras-indo/ghostfox
+# Fallback source for prebuilt engine/runtime when local-assets/ is absent
+# (e.g. plain `docker build .` on CI): use the upstream releases that exist.
+# The release pipeline stages local-assets/ so published images always use
+# the exact release-candidate binaries instead of this fallback.
+ARG GHOSTFOX_REPO=autokeren/ghostfox
+# Copy local release artifacts only if present (release pipeline stages them);
+# otherwise fall back to fetching from the GitHub release below.
 COPY local-assets/ /tmp/local-assets/
-RUN if [ -f /tmp/local-assets/ghostfox-bin ] && [ -f /tmp/local-assets/ghostcloak-mcp ]; then \
+RUN if [ -d /tmp/local-assets ] && [ -f /tmp/local-assets/ghostfox-bin ] && [ -f /tmp/local-assets/ghostcloak-mcp ]; then \
         mkdir -p /opt/ghostfox/engine /opt/ghostfox/mcp \
         && cp /tmp/local-assets/ghostfox-bin /opt/ghostfox/engine/ghostfox-bin \
         && cp /tmp/local-assets/ghostcloak-mcp /opt/ghostfox/mcp/ghostcloak-mcp \

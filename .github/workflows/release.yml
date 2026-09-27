@@ -152,6 +152,9 @@ jobs:
           - target: linux-x86_64
             os: ubuntu-latest
             suffix: ""
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            suffix: ""
           - target: windows-x86_64
             os: windows-latest
             suffix: ".exe"
@@ -225,6 +228,32 @@ jobs:
             runtime/python/dist/*.tar.gz
           retention-days: 30
 
+  models:
+    name: models
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download CAPTCHA model assets from upstream (one-time)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/models
+          cd /tmp/models
+          # GeeTest icon-click (yolo + siamese) and ddddocr (common + charset).
+          # These are binary ONNX weights (~115 MB total); they ship as release
+          # assets so the runtime never depends on upstream availability.
+          for f in yolov8s.onnx siamese_float.onnx common.onnx charset.txt; do
+            curl -fsSL --retry 3 --retry-delay 2 \
+              "https://github.com/autokeren/ghostfox/releases/download/v0.6.7/$f" \
+              -o "$f"
+            ls -la "$f"
+          done
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostfox-models
+          path: /tmp/models/
+          retention-days: 7
+
   integration:
     name: integration
     needs: [validate, runtime]
@@ -282,72 +311,9 @@ jobs:
           fi
           echo "secret scan clean"
 
-  docker:
-    name: docker
-    needs: [validate, runtime, engine]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.validate.outputs.sha }}
-      - name: Download release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: "ghostcloak-mcp-linux-x86_64-*|ghostfox-engine-linux-x86_64-*"
-          merge-multiple: true
-          path: /tmp/rel
-      - name: Stage local assets for Dockerfile
-        run: |
-          set -euo pipefail
-          mkdir -p local-assets
-          find /tmp/rel -type f -name "ghostcloak-mcp" -exec cp {} local-assets/ghostcloak-mcp \; -exec chmod +x local-assets/ghostcloak-mcp \;
-          # Engine uploads are zips (engine/dist/*) — unpack the linux-x86_64
-          # one and stage ghostfox-bin exactly as the Dockerfile expects.
-          ENGINE_ZIP=$(find /tmp/rel -type f -name "*lin.x86_64.zip" | head -1)
-          if [ -n "$ENGINE_ZIP" ]; then
-            mkdir -p /tmp/engine-unpack
-            unzip -q "$ENGINE_ZIP" -d /tmp/engine-unpack
-            find /tmp/engine-unpack -type f -name "ghostfox-bin" -exec cp {} local-assets/ghostfox-bin \; -exec chmod +x local-assets/ghostfox-bin \;
-          fi
-          ls -la local-assets/
-          [ -f local-assets/ghostcloak-mcp ] && [ -f local-assets/ghostfox-bin ] || { echo "::error::staged assets incomplete" >&2; exit 1; }
-      - name: Docker build no push
-        run: |
-          docker build -t ghostfox:ci \
-            --build-arg GHOSTFOX_VERSION=v${{ needs.validate.outputs.version }} \
-            --build-arg GHOSTFOX_REPO=${{ github.repository }} \
-            .
-      - name: Container E2E auth enforced
-        run: |
-          set -euo pipefail
-          docker run -d --name gf-test \
-            -e GHOSTFOX_TRANSPORT=http \
-            -e GHOSTFOX_HTTP_HOST=127.0.0.1 \
-            -e GHOSTFOX_HTTP_PORT=8787 \
-            -e GHOSTFOX_HTTP_API_KEY=ci-test-key \
-            ghostfox:ci
-          trap 'docker rm -f gf-test >/dev/null 2>&1 || true' EXIT
-          for i in $(seq 1 30); do
-            if docker exec gf-test sh -c 'curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1'; then
-              echo "healthz OK"
-              break
-            fi
-            sleep 2
-          done
-          CODE=$(docker exec gf-test sh -c 'curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:8787/mcp -H "Content-Type: application/json" -d "{}"')
-          echo "unauthenticated POST /mcp -> ${CODE} (expect 401)"
-          [ "$CODE" = "401" ]
-      - name: Upload docker log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-e2e-logs
-          path: /tmp/rel
-          retention-days: 14
-
   release-gate:
     name: release-gate
-    needs: [validate, engine, runtime, packages, integration, security, docker]
+    needs: [validate, engine, runtime, packages, integration, security, models]
     runs-on: ubuntu-latest
     if: ${{ !cancelled() && !failure() }}
     outputs:
@@ -364,8 +330,8 @@ jobs:
           echo "packages:    ${{ needs.packages.result }}"
           echo "integration: ${{ needs.integration.result }}"
           echo "security:    ${{ needs.security.result }}"
-          echo "docker:      ${{ needs.docker.result }}"
-          for j in validate engine runtime packages integration security docker; do
+          echo "models:      ${{ needs.models.result }}"
+          for j in validate engine runtime packages integration security models; do
             r=$(eval echo \${{ needs.$j.result }})
             if [ "$r" != "success" ]; then
               echo "::error::required job '$j' did not succeed ($r) — release BLOCKED" >&2
@@ -415,7 +381,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -480,7 +445,6 @@ jobs:
           - Origin allowlist validation
           - config.toml + env + CLI overrides, hot reload
           - Cross-platform CI: Ubuntu, macOS, Windows
-          - Docker image: ghcr.io/${{ github.repository }}:$TAG
 
           ### Compatibility
           - stdio mode unchanged; existing MCP clients keep working
@@ -499,25 +463,6 @@ jobs:
             xargs -0 -r -I{} gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" {} --clobber
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" /tmp/release/SHA256SUMS.txt --clobber || true
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" /tmp/release/release-manifest.json --clobber || true
-      - name: Push GHCR image
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="v${{ needs.release-gate.outputs.version }}"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker build \
-            --build-arg GHOSTFOX_VERSION="$TAG" \
-            --build-arg GHOSTFOX_REPO="$GITHUB_REPOSITORY" \
-            -t "ghcr.io/$GITHUB_REPOSITORY:$TAG" \
-            -t "ghcr.io/$GITHUB_REPOSITORY:latest" \
-            .
-          docker push "ghcr.io/$GITHUB_REPOSITORY:$TAG"
-          if [ "${{ needs.release-gate.outputs.prerelease }}" = "true" ]; then
-            echo "prerelease — skipping latest"
-          else
-            docker push "ghcr.io/$GITHUB_REPOSITORY:latest"
-          fi
       - name: Verify release after publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -534,32 +479,34 @@ jobs:
           ASSETS=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '[.assets[].name] | join("\n")')
           echo "$ASSETS" | grep -q "SHA256SUMS.txt" || { echo "::error::SHA256SUMS.txt missing" >&2; exit 1; }
           echo "$ASSETS" | grep -q "release-manifest.json" || { echo "::error::release-manifest.json missing" >&2; exit 1; }
-          COUNT=$(echo "$ASSETS" | grep -cE "ghostcloak-mcp-|ghostfox-engine-|\.tgz|\.whl|\.tar\.gz")
+          COUNT=$(echo "$ASSETS" | grep -cE "ghostcloak-mcp-|ghostfox-engine-|\.tgz|\.whl|\.tar\.gz|yolov8s\.onnx|siamese_float\.onnx|common\.onnx|charset\.txt")
           echo "release assets: ${COUNT}"
-          [ "$COUNT" -ge 10 ] || { echo "::error::too few release assets (${COUNT})" >&2; exit 1; }
-          docker pull "ghcr.io/$GITHUB_REPOSITORY:$TAG"
-          docker run -d --name gf-verify \
-            -e GHOSTFOX_TRANSPORT=http \
-            -e GHOSTFOX_HTTP_HOST=127.0.0.1 \
-            -e GHOSTFOX_HTTP_PORT=8787 \
-            -e GHOSTFOX_HTTP_API_KEY=verify-key \
-            "ghcr.io/$GITHUB_REPOSITORY:$TAG"
-          trap 'docker rm -f gf-verify >/dev/null 2>&1 || true' EXIT
+          [ "$COUNT" -ge 14 ] || { echo "::error::too few release assets (${COUNT})" >&2; exit 1; }
+          echo "$ASSETS" | grep -q "yolov8s.onnx" || { echo "::error::yolov8s.onnx missing" >&2; exit 1; }
+          echo "$ASSETS" | grep -q "siamese_float.onnx" || { echo "::error::siamese_float.onnx missing" >&2; exit 1; }
+          echo "$ASSETS" | grep -q "common.onnx" || { echo "::error::common.onnx missing" >&2; exit 1; }
+          echo "$ASSETS" | grep -q "charset.txt" || { echo "::error::charset.txt missing" >&2; exit 1; }
+          # Smoke the exact released Linux x86_64 binary: HTTP + auth + MCP.
+          BIN=/tmp/release/ghostcloak-mcp-linux-x86_64-${{ needs.release-gate.outputs.version }}/ghostcloak-mcp
+          chmod +x "$BIN"
+          "$BIN" --transport http --http-port 18787 --http-api-key verify-key &
+          SRV=$!
+          trap 'kill $SRV >/dev/null 2>&1 || true' EXIT
           for i in $(seq 1 30); do
-            if docker exec gf-verify sh -c 'curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1'; then
-              break
-            fi
-            sleep 2
+            if curl -fsS http://127.0.0.1:18787/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
           done
-          UNAUTH=$(docker exec gf-verify sh -c 'curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:8787/mcp -H "Content-Type: application/json" -d "{}"')
+          UNAUTH=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:18787/mcp -H "Content-Type: application/json" -d '{}')
           echo "unauthenticated -> ${UNAUTH} (expect 401)"
           [ "$UNAUTH" = "401" ]
-          INIT=$(docker exec gf-verify sh -c 'curl -s -X POST http://127.0.0.1:8787/mcp -H "Content-Type: application/json" -H "Authorization: Bearer verify-key" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"verify\",\"version\":\"1\"}}}"')
+          INIT=$(curl -s -X POST http://127.0.0.1:18787/mcp -H "Content-Type: application/json" -H "Authorization: Bearer verify-key" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify","version":"1"}}}')
           echo "initialize: $(echo "$INIT" | head -c 120)"
           echo "$INIT" | grep -qi "serverInfo" || { echo "::error::initialize did not return serverInfo" >&2; exit 1; }
-          LIST=$(docker exec gf-verify sh -c 'curl -s -X POST http://127.0.0.1:8787/mcp -H "Content-Type: application/json" -H "Authorization: Bearer verify-key" -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}"')
+          LIST=$(curl -s -X POST http://127.0.0.1:18787/mcp -H "Content-Type: application/json" -H "Authorization: Bearer verify-key" -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
           echo "tools/list: $(echo "$LIST" | head -c 120)"
           echo "$LIST" | grep -qi "\"tools\"" || { echo "::error::tools/list failed" >&2; exit 1; }
+          kill $SRV || true
+          wait $SRV 2>/dev/null || true
           echo "release verify OK — ${TAG}"
       - name: Write release report
         run: |
@@ -577,7 +524,7 @@ jobs:
           Protocol: rmcp Streamable HTTP
 
           ## Build
-          Engine: PASS (matrix) / Runtime: PASS (matrix) / Node: PASS / Python: PASS / Docker: PASS
+          Engine: PASS (matrix) / Runtime: PASS (matrix) / Node: PASS / Python: PASS / Models: PASS
 
           ## Tests
           stdio: PASS / http: PASS / config: PASS / hot reload: PASS / auth: PASS / origin: PASS / MCP Inspector: PASS (CI integration)

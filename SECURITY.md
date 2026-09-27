@@ -5,14 +5,7 @@
 Please report security issues privately to the maintainers. Do not open a
 public issue for a vulnerability.
 
-Preferred: GitHub Security Advisories → **Report a vulnerability**.
-
-If that is unavailable, email `security@autokeren.com` with:
-
-- affected component (`engine/` or `runtime/`)
-- affected version
-- reproduction steps or proof of concept
-- impact assessment
+Preferred: **GitHub Security Advisories** → **Report a vulnerability** on this repository.
 
 ## Response
 

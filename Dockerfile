@@ -1,7 +1,7 @@
 # Ghostfox runtime image: engine + MCP server, engine-first entrypoint.
 #
 # Build (from repo root):
-#   docker build -t ghostfox:ci .
+#   docker build -t ghcr.io/ras-indo/ghostfox:latest -f Dockerfile .
 # Run:
 #   docker run -p 7900:7900 -e GHOSTFOX_LIVE_VIEW_PORT=7900 ghcr.io/ras-indo/ghostfox
 #
@@ -26,46 +26,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Engine + runtime from the matching GitHub release (pinned by build arg).
-# When local-assets/ exists (release pipeline staged the exact artifacts
-# from this workflow), use them instead of hitting the network — this makes
-# the Docker image consume the EXACT release-candidate binaries/SHA.
 ARG GHOSTFOX_VERSION=v0.7.3
-# Fallback source for prebuilt engine/runtime when local-assets/ is absent
-# (e.g. plain `docker build .` on CI): use the upstream releases that exist.
-# The release pipeline stages local-assets/ so published images always use
-# the exact release-candidate binaries instead of this fallback.
-ARG GHOSTFOX_REPO=autokeren/ghostfox
-# Copy local release artifacts only if present (release pipeline stages them);
-# otherwise fall back to fetching from the GitHub release below.
-COPY local-assets/ /tmp/local-assets/
-RUN if [ -d /tmp/local-assets ] && [ -f /tmp/local-assets/ghostfox-bin ] && [ -f /tmp/local-assets/ghostcloak-mcp ]; then \
-        mkdir -p /opt/ghostfox/engine /opt/ghostfox/mcp \
-        && cp /tmp/local-assets/ghostfox-bin /opt/ghostfox/engine/ghostfox-bin \
-        && cp /tmp/local-assets/ghostcloak-mcp /opt/ghostfox/mcp/ghostcloak-mcp \
-        && chmod +x /opt/ghostfox/engine/ghostfox-bin /opt/ghostfox/mcp/ghostcloak-mcp \
-        && echo "Used local release artifacts" \
-        && rm -rf /tmp/local-assets /tmp/*; \
+ARG GHOSTFOX_REPO=ras-indo/ghostfox
+RUN curl -fsSL "https://api.github.com/repos/${GHOSTFOX_REPO}/releases/tags/${GHOSTFOX_VERSION}" \
+        -o /tmp/rel.json \
+ && ENGINE_URL=$(grep -o '"browser_download_url": *"[^"]*lin\.x86_64\.zip"' /tmp/rel.json | head -1 | sed 's/.*"\(https[^"]*\)"/\1/') \
+ && RUNTIME_URL=$(grep -o '"browser_download_url": *"[^"]*ghostcloak-mcp"' /tmp/rel.json | head -1 | sed 's/.*"\(https[^"]*\)"/\1/') \
+ && test -n "${ENGINE_URL:-}" && test -n "${RUNTIME_URL:-}" \
+ && curl -fL --retry 3 "$ENGINE_URL" -o /tmp/engine.zip \
+ && mkdir -p /opt/ghostfox/engine \
+ && unzip -q /tmp/engine.zip -d /tmp/engine-unpack \
+ \
+# The engine zip has no top-level dir: its files land directly in the
+# unpack dir. Support both layouts (flat, or wrapped in ghostfox/).
+ && if [ -d /tmp/engine-unpack/ghostfox ]; then \
+        mv /tmp/engine-unpack/ghostfox/* /opt/ghostfox/engine/; \
     else \
-        echo "local-assets not present — falling back to GitHub release ${GHOSTFOX_VERSION}" \
-        && curl -fsSL "https://api.github.com/repos/${GHOSTFOX_REPO}/releases/tags/${GHOSTFOX_VERSION}" \
-            -o /tmp/rel.json \
-        && ENGINE_URL=$(grep -o '"browser_download_url": *"[^"]*lin\.x86_64\.zip"' /tmp/rel.json | head -1 | sed 's/.*"\(https[^"]*\)"/\1/') \
-        && RUNTIME_URL=$(grep -o '"browser_download_url": *"[^"]*ghostcloak-mcp"' /tmp/rel.json | head -1 | sed 's/.*"\(https[^"]*\)"/\1/') \
-        && test -n "${ENGINE_URL:-}" && test -n "${RUNTIME_URL:-}" \
-        && curl -fL --retry 3 "$ENGINE_URL" -o /tmp/engine.zip \
-        && mkdir -p /opt/ghostfox/engine \
-        && unzip -q /tmp/engine.zip -d /tmp/engine-unpack \
-        && if [ -d /tmp/engine-unpack/ghostfox ]; then \
-                mv /tmp/engine-unpack/ghostfox/* /opt/ghostfox/engine/; \
-            else \
-                mv /tmp/engine-unpack/* /opt/ghostfox/engine/; \
-            fi \
-        && chmod +x /opt/ghostfox/engine/ghostfox-bin \
-        && mkdir -p /opt/ghostfox/mcp \
-        && curl -fL --retry 3 "$RUNTIME_URL" -o /opt/ghostfox/mcp/ghostcloak-mcp \
-        && chmod +x /opt/ghostfox/mcp/ghostcloak-mcp \
-        && rm -rf /tmp/*; \
-    fi
+        mv /tmp/engine-unpack/* /opt/ghostfox/engine/; \
+    fi \
+ && chmod +x /opt/ghostfox/engine/ghostfox-bin \
+ && mkdir -p /opt/ghostfox/mcp \
+ && curl -fL --retry 3 "$RUNTIME_URL" -o /opt/ghostfox/mcp/ghostcloak-mcp \
+ && chmod +x /opt/ghostfox/mcp/ghostcloak-mcp \
+ && rm -rf /tmp/*
 
 ENV GHOSTFOX_HOME=/opt/ghostfox/engine \
     GHOSTFOX_RECORDINGS=/data/recordings \

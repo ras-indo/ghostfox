@@ -11,19 +11,19 @@ Self-hosted · Open source · MCP-first · Engine-level anti-detect
 [![License](https://img.shields.io/badge/engine-MPL--2.0-orange)](engine/LICENSE)
 [![License](https://img.shields.io/badge/runtime-MIT%2FApache--2.0-blue)](runtime/LICENSE-MIT)
 [![Engine](https://img.shields.io/badge/engine-Firefox%20152-red)](engine/README.md)
-[![MCP Registry](https://img.shields.io/badge/MCP%20Registry-listed-blue)](https://registry.modelcontextprotocol.io/servers/io.github.autokeren/ghostfox)
+[![MCP Registry](https://img.shields.io/badge/MCP%20Registry-listed-blue)](https://registry.modelcontextprotocol.io/servers/io.github.ras-indo/ghostfox)
 [![PyPI](https://img.shields.io/pypi/v/ghostfox)](https://pypi.org/project/ghostfox/)
 [![npm](https://img.shields.io/npm/v/ghostfox)](https://www.npmjs.com/package/ghostfox)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fautokeren%2Fghostfox-2496ED)](https://github.com/autokeren/ghostfox/pkgs/container/ghostfox)
-[![ghostfox MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/autokeren/ghostfox/badges/card.svg)](https://glama.ai/mcp/servers/autokeren/ghostfox)
-[![ghostfox MCP server – quality score on Glama](https://glama.ai/mcp/servers/autokeren/ghostfox/badges/score.svg)](https://glama.ai/mcp/servers/autokeren/ghostfox)
-[![CI](https://github.com/autokeren/ghostfox/actions/workflows/ci.yml/badge.svg)](https://github.com/autokeren/ghostfox/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/autokeren/ghostfox)](https://github.com/autokeren/ghostfox/releases/latest)
-[![Stars](https://img.shields.io/github/stars/autokeren/ghostfox?style=social)](https://github.com/autokeren/ghostfox)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fras-indo%2Fghostfox-2496ED)](https://github.com/ras-indo/ghostfox/pkgs/container/ghostfox)
+[![ghostfox MCP server – quality and maintenance score on Glama](https://glama.ai/mcp/servers/ras-indo/ghostfox/badges/card.svg)](https://glama.ai/mcp/servers/ras-indo/ghostfox)
+[![ghostfox MCP server – quality score on Glama](https://glama.ai/mcp/servers/ras-indo/ghostfox/badges/score.svg)](https://glama.ai/mcp/servers/ras-indo/ghostfox)
+[![CI](https://github.com/ras-indo/ghostfox/actions/workflows/ci.yml/badge.svg)](https://github.com/ras-indo/ghostfox/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ras-indo/ghostfox)](https://github.com/ras-indo/ghostfox/releases/latest)
+[![Stars](https://img.shields.io/github/stars/ras-indo/ghostfox?style=social)](https://github.com/ras-indo/ghostfox)
 
 <img src="docs/demo.gif" width="640" alt="Ghostfox demo: android persona + detection panel" />
 
-[![Watch the full demo](https://img.shields.io/badge/watch-full%20demo%20(video)-a78bfa)](docs/demo.mp4) · [Docs site](https://autokeren.github.io/ghostfox/)
+[![Watch the full demo](https://img.shields.io/badge/watch-full%20demo%20(video)-a78bfa)](docs/demo.mp4) · [Docs site](https://ras-indo.github.io/ghostfox/)
 
 </div>
 
@@ -125,14 +125,14 @@ npm install -g ghostfox        # or: npx ghostfox install
 }
 
 # Docker (engine + MCP runtime, ubuntu:24.04 base)
-docker run -i --rm ghcr.io/autokeren/ghostfox:v0.7.2
+docker run -i --rm ghcr.io/ras-indo/ghostfox:v0.7.2
 # or one-line install of the binary stack:
-curl -fsSL https://raw.githubusercontent.com/autokeren/ghostfox/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ras-indo/ghostfox/main/install.sh | bash
 ```
 
 Also listed on the official
-[MCP Registry](https://registry.modelcontextprotocol.io/servers/io.github.autokeren/ghostfox)
-(`io.github.autokeren/ghostfox`) — one-click add in registry-aware clients.
+[MCP Registry](https://registry.modelcontextprotocol.io/servers/io.github.ras-indo/ghostfox)
+(`io.github.ras-indo/ghostfox`) — one-click add in registry-aware clients.
 
 From source:
 
@@ -141,7 +141,7 @@ From source:
 unzip ghostfox-<ver>-lin.x86_64.zip -d /opt/ghostfox
 
 # 2) Build the runtime
-git clone https://github.com/autokeren/ghostfox.git
+git clone https://github.com/ras-indo/ghostfox.git
 cd ghostfox/runtime
 cargo build --release
 ```
@@ -194,7 +194,7 @@ humans want to watch the agent work.
 **Or install in one command** (Linux x86_64):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/autokeren/ghostfox/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ras-indo/ghostfox/main/install.sh | bash
 ```
 
 From source end-to-end (build the engine yourself):

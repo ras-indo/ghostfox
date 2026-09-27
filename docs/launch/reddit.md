@@ -40,9 +40,9 @@ Honest downsides: pre-alpha, CreepJS-class testers can crash the engine
 testing/research tool — don't point it at things you don't have permission
 to test.
 
-Repo: https://github.com/autokeren/ghostfox
-Docs: https://autokeren.github.io/ghostfox/
-Install: `curl -fsSL https://raw.githubusercontent.com/autokeren/ghostfox/main/install.sh | bash`
+Repo: https://github.com/ras-indo/ghostfox
+Docs: https://ras-indo.github.io/ghostfox/
+Install: `curl -fsSL https://raw.githubusercontent.com/ras-indo/ghostfox/main/install.sh | bash`
 
 What would make you switch from your current setup? Especially curious
 what's missing for your workflows — the roadmap has captcha-solver hooks,
@@ -80,6 +80,6 @@ Caveats: pre-alpha, needs Linux to build the engine yourself (prebuilts for
 everything), monthly Firefox rebases are the real maintenance cost, and
 it's a research/testing tool — use it on things you're allowed to test.
 
-Repo: https://github.com/autokeren/ghostfox ·
-Docs: https://autokeren.github.io/ghostfox/ ·
-Docker: `docker run ghcr.io/autokeren/ghostfox`
+Repo: https://github.com/ras-indo/ghostfox ·
+Docs: https://ras-indo.github.io/ghostfox/ ·
+Docker: `docker run ghcr.io/ras-indo/ghostfox`

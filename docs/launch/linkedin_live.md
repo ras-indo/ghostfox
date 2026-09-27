@@ -66,13 +66,13 @@ What's the wildest thing you've seen an AI agent do on the web?
 
 Ghostfox is free and open source:
 
-🔗 Repo: github.com/autokeren/ghostfox
-🌐 Landing: ghostfox.autokeren.com
-📚 Docs: autokeren.github.io/ghostfox
+🔗 Repo: github.com/ras-indo/ghostfox
+🌐 Landing: ghostfox.ras-indo.github.io
+📚 Docs: ras-indo.github.io/ghostfox
 
 Install:
 → pip install ghostfox
 → npx ghostfox install
-→ docker pull ghcr.io/autokeren/ghostfox
+→ docker pull ghcr.io/ras-indo/ghostfox
 
 Verified by Glama: 100% Server Quality Checklist, 15/19 tools rated A.

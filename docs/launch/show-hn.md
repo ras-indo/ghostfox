@@ -45,10 +45,10 @@ Honest caveats:
 - Forking Firefox means monthly rebases — the maintenance burden is real.
 - This is a testing/research tool. Don't point it at anything you don't have permission to test.
 
-Repo: https://github.com/autokeren/ghostfox
-Docs: https://autokeren.github.io/ghostfox/
-Install (Linux x86_64): `curl -fsSL https://raw.githubusercontent.com/autokeren/ghostfox/main/install.sh | bash`
-Docker: `docker run ghcr.io/autokeren/ghostfox`
+Repo: https://github.com/ras-indo/ghostfox
+Docs: https://ras-indo.github.io/ghostfox/
+Install (Linux x86_64): `curl -fsSL https://raw.githubusercontent.com/ras-indo/ghostfox/main/install.sh | bash`
+Docker: `docker run ghcr.io/ras-indo/ghostfox`
 
 Built on the shoulders of Camoufox (daijro), Firefox, LibreWolf patch tooling, and Playwright's Juggler protocol docs. Huge gratitude to all of them.
 

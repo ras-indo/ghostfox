@@ -6,3 +6,4 @@ pub mod geetest;
 pub mod http;
 pub mod ocr;
 pub mod recording;
+pub mod server;

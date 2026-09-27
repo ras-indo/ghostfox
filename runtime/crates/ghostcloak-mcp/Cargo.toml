@@ -45,6 +45,7 @@ rten-imageproc.workspace = true
 image.workspace = true
 once_cell.workspace = true
 dirs.workspace = true
+rand.workspace = true
 axum.workspace = true
 uuid.workspace = true
 subtle.workspace = true

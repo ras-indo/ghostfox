@@ -20,9 +20,19 @@ permissions:
 
 jobs:
   build-runtime:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            suffix: ""
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            suffix: "-arm64"
+    runs-on: ${{ matrix.runner }}
+    name: "runtime ${{ matrix.arch }}"
     steps:
-      - name: Build ghostcloak-mcp inside ubuntu:24.04
+      - name: Build ghostcloak-mcp inside ubuntu:24.04 (${{ matrix.arch }})
         run: |
           docker run --rm \
             -v "$PWD/runtime:/src:ro" \
@@ -52,9 +62,17 @@ jobs:
           sudo chown "$(id -u):$(id -g)" /tmp/gf-out/ghostcloak-mcp
           ls -la /tmp/gf-out/ghostcloak-mcp
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghostcloak-mcp-${{ matrix.arch }}-${{ github.run_id }}
+          path: /tmp/gf-out/ghostcloak-mcp
+          retention-days: 7
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           files: /tmp/gf-out/ghostcloak-mcp
+          asset_name: ghostcloak-mcp${{ matrix.suffix }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

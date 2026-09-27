@@ -19,7 +19,10 @@ ghostcloak-core = { path = "../ghostcloak-core" }
 ghostcloak-fingerprint = { path = "../ghostcloak-fingerprint" }
 ghostcloak-chromium = { path = "../ghostcloak-engines/ghostcloak-chromium" }
 ghostcloak-camoufox = { path = "../ghostcloak-engines/ghostcloak-camoufox" }
-rmcp.workspace = true
+rmcp = { workspace = true, features = [
+    "transport-streamable-http-server",
+    "tower",
+] }
 schemars = "1"
 toml.workspace = true
 tokio.workspace = true
@@ -42,6 +45,13 @@ rten-imageproc.workspace = true
 image.workspace = true
 once_cell.workspace = true
 dirs.workspace = true
+axum.workspace = true
+uuid.workspace = true
+subtle.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+reqwest.workspace = true

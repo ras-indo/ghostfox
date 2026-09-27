@@ -53,9 +53,14 @@ RUN curl -fsSL "https://api.github.com/repos/${GHOSTFOX_REPO}/releases/tags/${GH
 ENV GHOSTFOX_HOME=/opt/ghostfox/engine \
     GHOSTFOX_RECORDINGS=/data/recordings \
     RUST_LOG=warn
+# HTTP mode (optional — default is stdio):
+# GHOSTFOX_TRANSPORT=http
+# GHOSTFOX_HTTP_HOST=0.0.0.0
+# GHOSTFOX_HTTP_PORT=8787
+# GHOSTFOX_HTTP_API_KEY=<your-api-key>
 
 VOLUME /data
 WORKDIR /data
-EXPOSE 7900
+EXPOSE 7900 8787
 
 ENTRYPOINT ["/opt/ghostfox/mcp/ghostcloak-mcp"]

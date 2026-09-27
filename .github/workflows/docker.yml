@@ -71,12 +71,72 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - name: Build image (local only)
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: false
+          load: true
           build-args: |
             GHOSTFOX_VERSION=${{ steps.rel.outputs.tag }}
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ steps.rel.outputs.tag }}
+          tags: ghostfox:ci
+
+      - name: Container HTTP smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name gf-smoke \
+            -p 18787:8787 \
+            -e GHOSTFOX_TRANSPORT=http \
+            -e GHOSTFOX_HTTP_HOST=0.0.0.0 \
+            -e GHOSTFOX_HTTP_PORT=8787 \
+            -e GHOSTFOX_HTTP_API_KEY=smoke-test-key-0123456789abcdef \
+            ghostfox:ci
+          trap 'docker rm -f gf-smoke >/dev/null 2>&1 || true' EXIT
+          # Wait for server to start
+          for i in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+              http://127.0.0.1:18787/mcp 2>/dev/null || true)
+            if [ "$CODE" != "000" ]; then break; fi
+            sleep 2
+          done
+          # No key -> 401
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            http://127.0.0.1:18787/mcp)
+          test "$CODE" = "401" || { echo "FAIL: no key expected 401, got $CODE"; exit 1; }
+          # Wrong key -> 401
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer wrong-key" \
+            http://127.0.0.1:18787/mcp)
+          test "$CODE" = "401" || { echo "FAIL: wrong key expected 401, got $CODE"; exit 1; }
+          # Correct key -> initialize
+          curl -s -D /tmp/gf_init_hdr -o /tmp/gf_init.json \
+            -X POST \
+            -H "Authorization: Bearer smoke-test-key-0123456789abcdef" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"docker-smoke","version":"0"}}}' \
+            http://127.0.0.1:18787/mcp
+          grep -q "protocolVersion" /tmp/gf_init.json
+          SID=$(grep -i "^mcp-session-id:" /tmp/gf_init_hdr | tr -d '\r' | awk '{print $2}')
+          test -n "$SID" || { echo "FAIL: missing mcp-session-id"; cat /tmp/gf_init_hdr; exit 1; }
+          # tools/list
+          curl -s -o /tmp/gf_tools.json -X POST \
+            -H "Authorization: Bearer smoke-test-key-0123456789abcdef" \
+            -H "mcp-session-id: $SID" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            http://127.0.0.1:18787/mcp
+          grep -q "session_create" /tmp/gf_tools.json
+          docker stop gf-smoke >/dev/null
+          echo "PASS: container HTTP smoke"
+
+      - name: Push image
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+          IMG: ghcr.io/${{ github.repository }}
+        run: |
+          docker tag ghostfox:ci "$IMG:$TAG"
+          docker tag ghostfox:ci "$IMG:latest"
+          docker push "$IMG:$TAG"
+          docker push "$IMG:latest"

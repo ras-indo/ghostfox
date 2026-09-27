@@ -2614,3 +2614,19 @@ impl rmcp::ServerHandler for GhostcloakServer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Clone produces a second handle that shares the same underlying
+    /// `Arc<RwLock<ServerState>>` — this is the guarantee that enables
+    /// the `both` transport mode without session duplication.
+    #[test]
+    fn clones_share_underlying_state() {
+        let a = GhostcloakServer::new();
+        let b = a.clone();
+        assert!(Arc::ptr_eq(&a.state, &b.state));
+    }
+}

@@ -37,6 +37,25 @@ jobs:
       - name: Release build
         run: cargo build --release -p ghostcloak-mcp
 
+  http-smoke:
+    name: HTTP transport smoke
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: runtime
+      - name: Build binary
+        run: cargo build -p ghostcloak-mcp
+      - name: Stdio regression smoke
+        run: bash ../scripts/stdio-smoke.sh ./target/debug/ghostcloak-mcp
+      - name: HTTP smoke test
+        run: bash ../scripts/http-smoke.sh ./target/debug/ghostcloak-mcp 18787
+
   packages:
     name: Package checks
     runs-on: ubuntu-24.04

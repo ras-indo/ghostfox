@@ -22,10 +22,12 @@ jobs:
   build-runtime:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Build ghostcloak-mcp inside ubuntu:24.04
         run: |
           docker run --rm \
-            -v "$PWD/runtime:/src:ro" \
+            -v "$PWD:/src:ro" \
             -v /tmp/gf-cargo:/cargo \
             -v /tmp/gf-target:/target \
             -v /tmp/gf-out:/out \
@@ -46,11 +48,19 @@ jobs:
               (cd /src && tar --exclude=./target -cf - .) | tar -xf - -C /work
               cd /work
               cargo build --release -p ghostcloak-mcp --target-dir /target 2>&1 | tail -5
-              strip /target/release/ghostcloak-mcp
               cp /target/release/ghostcloak-mcp /out/ghostcloak-mcp
             '
           sudo chown "$(id -u):$(id -g)" /tmp/gf-out/ghostcloak-mcp
+          chmod +x /tmp/gf-out/ghostcloak-mcp
           ls -la /tmp/gf-out/ghostcloak-mcp
+
+      - name: HTTP smoke test (release binary)
+        run: |
+          bash scripts/http-smoke.sh /tmp/gf-out/ghostcloak-mcp 18787
+          bash scripts/stdio-smoke.sh /tmp/gf-out/ghostcloak-mcp
+
+      - name: Strip binary
+        run: strip /tmp/gf-out/ghostcloak-mcp
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2

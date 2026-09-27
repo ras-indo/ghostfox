@@ -200,6 +200,150 @@ curl -fsSL https://raw.githubusercontent.com/autokeren/ghostfox/main/install.sh 
 From source end-to-end (build the engine yourself):
 see [engine/README.md](engine/README.md) — `make dir && make build`.
 
+## MCP Transports
+
+Ghostfox MCP supports three transport modes:
+
+### Stdio (default)
+
+The MCP server communicates over stdin/stdout — compatible with every
+MCP client that launches a subprocess.
+
+```bash
+ghostcloak-mcp                          # default
+ghostcloak-mcp --transport stdio        # explicit
+```
+
+**stdout = MCP protocol only.**  All logging, config, and diagnostic
+output goes to stderr, per the MCP specification.
+
+### Streamable HTTP
+
+An authenticated HTTP endpoint for remote or browser-based MCP clients.
+
+```bash
+ghostcloak-mcp --transport http \
+  --http-host 127.0.0.1 \
+  --http-port 8787 \
+  --http-api-key my-secret-key
+```
+
+The endpoint is `POST /mcp` (configurable).  Authentication uses the
+`Authorization: Bearer <API_KEY>` header.  Missing or wrong keys
+receive `401 Unauthorized`.
+
+If no API key is provided, one is generated on first run and persisted
+to the config file (`~/.ghostfox/config.toml`, permission `0600`).
+
+### HTTP + stdio ("both")
+
+A single process runs both transports simultaneously, sharing the same
+session state.  Both the stdio client and HTTP clients operate in the
+same trust domain — there is no user/session isolation between them.
+
+```bash
+ghostcloak-mcp --transport both
+```
+
+### Configuration
+
+Configuration sources are merged with deterministic precedence:
+
+```
+CLI flags  >  Environment variables  >  Config file  >  Defaults
+```
+
+**Config file** (TOML):
+
+```toml
+# ~/.ghostfox/config.toml (override with GHOSTFOX_CONFIG or --config)
+
+[server]
+transport = "http"
+
+[http]
+host = "127.0.0.1"
+port = 8787
+api_key = ""               # auto-generated if empty and transport uses HTTP
+allowed_origins = []       # browser Origin headers to accept
+endpoint = "/mcp"
+```
+
+**Environment variables:**
+
+| Variable                      | Example                    |
+|-------------------------------|----------------------------|
+| `GHOSTFOX_CONFIG`             | `/etc/ghostfox/config.toml`|
+| `GHOSTFOX_TRANSPORT`          | `http`                     |
+| `GHOSTFOX_HTTP_HOST`          | `0.0.0.0`                  |
+| `GHOSTFOX_HTTP_PORT`          | `9000`                     |
+| `GHOSTFOX_HTTP_API_KEY`       | `my-secret-key`            |
+| `GHOSTFOX_HTTP_ALLOWED_ORIGINS` | `http://localhost:3000`  |
+
+**CLI flags** override everything:
+
+```
+--transport stdio|http|both
+--http-host IP
+--http-port PORT
+--http-api-key KEY
+--http_allowed_origins ORIGINS
+--config PATH
+```
+
+### Hot reload
+
+The config file is re-checked on every HTTP request (cheap mtime
+stat).  Changed `api_key` and `allowed_origins` values take effect
+immediately — old keys are rejected, new keys are accepted.
+
+Changes to `transport`, `host`, `port`, or `endpoint` require a
+restart and are logged as warnings during reload.
+
+If the reloaded config is invalid, the last known good configuration
+is kept.
+
+### Origin validation
+
+Streamable HTTP MCP requires DNS-rebinding protection.  When an
+`Origin` header is present, it must appear in the `allowed_origins`
+list — otherwise the request receives `403 Forbidden`.  Requests
+without an `Origin` header (non-browser clients) are always accepted.
+
+An empty `allowed_origins` (the default) blocks all browser-origin
+requests while still accepting CLI/API clients.
+
+### Security notes
+
+- **API key = authentication.**  It does not replace TLS.
+- **API key = NOT logging.**  Keys never appear in logs, traces, or
+  error messages.
+- Default bind: `127.0.0.1` (loopback only).
+- For remote access, use a reverse proxy with TLS:
+
+  ```
+  Internet → HTTPS reverse proxy → Ghostfox HTTP :8787
+  ```
+
+### Docker
+
+```bash
+# Stdio mode (default, no extra env needed)
+docker run -i --rm ghcr.io/autokeren/ghostfox:v0.7.2
+
+# HTTP mode
+docker run -p 8787:8787 \
+  -e GHOSTFOX_TRANSPORT=http \
+  -e GHOSTFOX_HTTP_HOST=0.0.0.0 \
+  -e GHOSTFOX_HTTP_PORT=8787 \
+  -e GHOSTFOX_HTTP_API_KEY=my-secret-key \
+  ghcr.io/autokeren/ghostfox:v0.7.2
+```
+
+When binding to `0.0.0.0` (required in containers), authentication is
+always enforced.  The server logs a warning when non-loopback binding
+is detected.
+
 ## Repository layout
 
 ````

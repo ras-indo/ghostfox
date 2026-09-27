@@ -27,7 +27,11 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chromiumoxide = { version = "0.9", default-features = false }
-rmcp = { version = "0.3", features = ["server", "transport-io", "macros", "schemars"] }
+rmcp = { version = "0.3", features = ["server", "transport-io", "macros", "schemars", "transport-streamable-http-server"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+subtle = "2"
+http = "1"
+tokio-util = { version = "0.7", features = ["sync"] }
 futures = "0.3"
 async-trait = "0.1"
 rand = "0.9"

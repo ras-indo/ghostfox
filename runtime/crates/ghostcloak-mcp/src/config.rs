@@ -275,7 +275,7 @@ fn persist_config(cfg: &Config) -> Result<()> {
 pub struct ReloadTracker {
     path: PathBuf,
     last_modified: SystemTime,
-    last_len: u64,
+    last_content_hash: u64,
     last_config: Config,
 }
 
@@ -288,11 +288,11 @@ impl ReloadTracker {
     /// Create a tracker watching an explicit config path (used by tests to
     /// avoid parallel-test env-var races on GHOSTFOX_CONFIG).
     pub fn new_at(cfg: Config, path: PathBuf) -> Self {
-        let (last_modified, last_len) = file_fingerprint(&path);
+        let (last_modified, last_content_hash) = file_content_fingerprint(&path);
         Self {
             path,
             last_modified,
-            last_len,
+            last_content_hash,
             last_config: cfg,
         }
     }
@@ -301,15 +301,15 @@ impl ReloadTracker {
     /// reload happened and the current active config (either new or
     /// last-known-good).
     pub fn check_reload(&mut self) -> (bool, Config) {
-        let (current_modified, current_len) = file_fingerprint(&self.path);
+        let (current_modified, current_content_hash) = file_content_fingerprint(&self.path);
 
-        if current_modified <= self.last_modified && current_len == self.last_len {
+        if current_content_hash == self.last_content_hash {
             return (false, self.last_config.clone());
         }
 
-        // File changed — try to reload
+        // File content changed — try to reload
         self.last_modified = current_modified;
-        self.last_len = current_len;
+        self.last_content_hash = current_content_hash;
         match std::fs::read_to_string(&self.path) {
             Ok(content) => match toml::from_str::<Config>(&content) {
                 Ok(mut new_cfg) => {
@@ -341,6 +341,27 @@ fn file_fingerprint(path: &std::path::Path) -> (SystemTime, u64) {
         Ok(m) => (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()),
         Err(_) => (SystemTime::UNIX_EPOCH, 0),
     }
+}
+
+/// Compute a change-detection fingerprint: (mtime, hash of content).
+/// Content hash is cheap for small config files and avoids stale metadata
+/// that some platforms report after rapid truncate+rewrite sequences.
+fn file_content_fingerprint(path: &std::path::Path) -> (SystemTime, u64) {
+    let mtime = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let hash: u64 = match std::fs::read(path) {
+        Ok(bytes) => {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            hasher.finish()
+        }
+        Err(_) => 0,
+    };
+    (mtime, hash)
 }
 
 // ---------------------------------------------------------------------------

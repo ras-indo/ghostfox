@@ -16,11 +16,11 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-REPO = "autokeren/ghostfox"
+REPO = os.environ.get("GHOSTFOX_REPO", "ras-indo/ghostfox")
 
 
 def _latest_release() -> dict:
-    url = f"https://api.github.com/repos/{REPO}//releases/latest"
+    url = f"https://api.github.com/repos/{REPO}/releases/latest"
     req = urllib.request.Request(url, headers={"User-Agent": "ghostfox-py"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)

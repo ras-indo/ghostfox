@@ -27,8 +27,8 @@ Open source. Self-hosted. Yours.
 
 It's live on npm, PyPI, Docker Hub, and the official MCP Registry.
 
-🔗 github.com/autokeren/ghostfox
-📄 autokeren.github.io/ghostfox
+🔗 github.com/ras-indo/ghostfox
+📄 ras-indo.github.io/ghostfox
 
 What would you build if your agent could actually see the web?
 
@@ -51,9 +51,9 @@ Ghostfox = self-hosted stealth browser for AI agents:
 
 19 tools. 6 platforms. Open source. Self-hosted.
 
-pip install ghostfox | npx ghostfox | docker run ghcr.io/autokeren/ghostfox
+pip install ghostfox | npx ghostfox | docker run ghcr.io/ras-indo/ghostfox
 
-🔗 github.com/autokeren/ghostfox
+🔗 github.com/ras-indo/ghostfox
 
 #AI #OpenSource #MCP #Rust #AIAgents
 
@@ -79,8 +79,8 @@ Under the hood: our own fork of the Camoufox Firefox patches + a Rust MCP runtim
 
 Try it: pip install ghostfox
 
-🔗 github.com/autokeren/ghostfox
-📄 autokeren.github.io/ghostfox
+🔗 github.com/ras-indo/ghostfox
+📄 ras-indo.github.io/ghostfox
 
 #Rust #Firefox #MCP #AIAgents #OpenSource #WebAutomation
 

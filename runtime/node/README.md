@@ -1,8 +1,8 @@
-mcp-name: io.github.autokeren/ghostfox
+mcp-name: io.github.ras-indo/ghostfox
 
 # ghostfox (npm)
 
-npm surface for the [Ghostfox](https://github.com/autokeren/ghostfox)
+npm surface for the [Ghostfox](https://github.com/ras-indo/ghostfox)
 agent-native stealth browser. Zero npm dependencies.
 
 ```bash
@@ -26,7 +26,7 @@ native captcha suite (`page_geetest_click`, `page_geetest_slide`,
 `page_captcha_rotate`, `page_captcha_ocr`, `page_hcaptcha`, `captcha_solve`),
 the debug cortex (`page_console`, `page_errors`, `page_network_*`) and
 multi-model vision helpers. Full list: see the
-[main README](https://github.com/autokeren/ghostfox#full-tool-surface-43-tools).
+[main README](https://github.com/ras-indo/ghostfox#full-tool-surface-43-tools).
 
-Docs: https://autokeren.github.io/ghostfox/ ·
-Docker: `ghcr.io/autokeren/ghostfox` · Python: `pip install ghostfox`
+Docs: https://ras-indo.github.io/ghostfox/ ·
+Docker: `ghcr.io/ras-indo/ghostfox` · Python: `pip install ghostfox`

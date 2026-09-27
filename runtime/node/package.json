@@ -5,9 +5,9 @@
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/autokeren/ghostfox"
+    "url": "https://github.com/ras-indo/ghostfox"
   },
-  "homepage": "https://autokeren.github.io/ghostfox/",
+  "homepage": "https://ras-indo.github.io/ghostfox/",
   "keywords": [
     "mcp",
     "browser",
@@ -26,5 +26,5 @@
   "files": [
     "bin/"
   ],
-  "mcpName": "io.github.autokeren/ghostfox"
+  "mcpName": "io.github.ras-indo/ghostfox"
 }

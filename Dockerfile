@@ -1,9 +1,9 @@
 # Ghostfox runtime image: engine + MCP server, engine-first entrypoint.
 #
 # Build (from repo root):
-#   docker build -t ghcr.io/autokeren/ghostfox:latest -f Dockerfile .
+#   docker build -t ghcr.io/ras-indo/ghostfox:latest -f Dockerfile .
 # Run:
-#   docker run -p 7900:7900 -e GHOSTFOX_LIVE_VIEW_PORT=7900 ghcr.io/autokeren/ghostfox
+#   docker run -p 7900:7900 -e GHOSTFOX_LIVE_VIEW_PORT=7900 ghcr.io/ras-indo/ghostfox
 #
 # The MCP server speaks stdio; for containerized use, mount a socket or run
 # it under an MCP gateway. For quick inspection, GHOSTFOX_LIVE_VIEW_PORT
@@ -26,8 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Engine + runtime from the matching GitHub release (pinned by build arg).
-ARG GHOSTFOX_VERSION=v0.1.0
-ARG GHOSTFOX_REPO=autokeren/ghostfox
+ARG GHOSTFOX_VERSION=v0.7.3
+ARG GHOSTFOX_REPO=ras-indo/ghostfox
 RUN curl -fsSL "https://api.github.com/repos/${GHOSTFOX_REPO}/releases/tags/${GHOSTFOX_VERSION}" \
         -o /tmp/rel.json \
  && ENGINE_URL=$(grep -o '"browser_download_url": *"[^"]*lin\.x86_64\.zip"' /tmp/rel.json | head -1 | sed 's/.*"\(https[^"]*\)"/\1/') \

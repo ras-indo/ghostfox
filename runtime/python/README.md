@@ -1,8 +1,8 @@
-mcp-name: io.github.autokeren/ghostfox
+mcp-name: io.github.ras-indo/ghostfox
 
 # ghostfox (Python)
 
-Python surface for the [Ghostfox](https://github.com/autokeren/ghostfox)
+Python surface for the [Ghostfox](https://github.com/ras-indo/ghostfox)
 agent-native stealth browser.
 
 ```python

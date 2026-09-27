@@ -42,8 +42,8 @@ Ghostfox by AutoKeren — the agent-native stealth browser you own.
 ✅ Open source (MIT/MPL-2.0)
 ✅ Self-hosted — your data never leaves your machine
 
-🔗 github.com/autokeren/ghostfox
-🌐 ghostfox.autokeren.com
+🔗 github.com/ras-indo/ghostfox
+🌐 ghostfox.ras-indo.github.io
 
 Screen recording coming soon. Follow for updates.
 

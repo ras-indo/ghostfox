@@ -261,22 +261,26 @@ fn persist_config(cfg: &Config) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Metadata for detecting config file changes.
+///
+/// Uses (mtime, size) as the change fingerprint: mtime alone is not
+/// reliable on filesystems with coarse timestamp granularity (e.g. ext4
+/// 1s), so a size change with an unchanged mtime also triggers reload.
 #[derive(Debug, Clone)]
 pub struct ReloadTracker {
     path: PathBuf,
     last_modified: SystemTime,
+    last_len: u64,
     last_config: Config,
 }
 
 impl ReloadTracker {
     pub fn new(cfg: Config) -> Self {
         let path = config_path();
-        let last_modified = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let (last_modified, last_len) = file_fingerprint(&path);
         Self {
             path,
             last_modified,
+            last_len,
             last_config: cfg,
         }
     }
@@ -285,16 +289,15 @@ impl ReloadTracker {
     /// reload happened and the current active config (either new or
     /// last-known-good).
     pub fn check_reload(&mut self) -> (bool, Config) {
-        let current_modified = std::fs::metadata(&self.path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let (current_modified, current_len) = file_fingerprint(&self.path);
 
-        if current_modified <= self.last_modified {
+        if current_modified <= self.last_modified && current_len == self.last_len {
             return (false, self.last_config.clone());
         }
 
         // File changed — try to reload
         self.last_modified = current_modified;
+        self.last_len = current_len;
         match std::fs::read_to_string(&self.path) {
             Ok(content) => match toml::from_str::<Config>(&content) {
                 Ok(mut new_cfg) => {
@@ -317,6 +320,14 @@ impl ReloadTracker {
 
     pub fn current(&self) -> &Config {
         &self.last_config
+    }
+}
+
+/// Read (mtime, size) of a file; both default to zero when unavailable.
+fn file_fingerprint(path: &std::path::Path) -> (SystemTime, u64) {
+    match std::fs::metadata(path) {
+        Ok(m) => (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()),
+        Err(_) => (SystemTime::UNIX_EPOCH, 0),
     }
 }
 

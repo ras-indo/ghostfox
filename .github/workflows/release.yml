@@ -331,13 +331,21 @@ jobs:
           echo "integration: ${{ needs.integration.result }}"
           echo "security:    ${{ needs.security.result }}"
           echo "models:      ${{ needs.models.result }}"
-          for j in validate engine runtime packages integration security models; do
-            r=$(eval echo \${{ needs.$j.result }})
+          FAIL=0
+          for r in \
+            "${{ needs.validate.result }}" \
+            "${{ needs.engine.result }}" \
+            "${{ needs.runtime.result }}" \
+            "${{ needs.packages.result }}" \
+            "${{ needs.integration.result }}" \
+            "${{ needs.security.result }}" \
+            "${{ needs.models.result }}"; do
             if [ "$r" != "success" ]; then
-              echo "::error::required job '$j' did not succeed ($r) — release BLOCKED" >&2
-              exit 1
+              echo "::error::required job did not succeed ($r) — release BLOCKED" >&2
+              FAIL=1
             fi
           done
+          if [ "$FAIL" = "1" ]; then exit 1; fi
           echo "ALL RELEASE GATES SUCCESS"
       - name: Download all artifacts
         uses: actions/download-artifact@v4

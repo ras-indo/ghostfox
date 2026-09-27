@@ -57,7 +57,7 @@ async fn mcp_handler(State(state): State<AppState>, req: Request<Body>) -> impl 
     let service = rmcp::transport::streamable_http_server::tower::StreamableHttpService::new(
         move || Ok(server.clone()),
         Arc::new(
-            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::new(),
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
         ),
         rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig::default(),
     );

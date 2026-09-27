@@ -200,6 +200,144 @@ curl -fsSL https://raw.githubusercontent.com/ras-indo/ghostfox/main/install.sh |
 From source end-to-end (build the engine yourself):
 see [engine/README.md](engine/README.md) — `make dir && make build`.
 
+## MCP transports
+
+Ghostfox ships **two** MCP transports on the same binary — stdio (default,
+unchanged) and Streamable HTTP (opt-in) — both exposing the exact same
+42-tool surface.
+
+### stdio (default — backward compatible)
+
+```bash
+ghostcloak-mcp
+```
+
+Stdio mode is unchanged from previous releases: MCP messages on stdout,
+logs on stderr. Existing MCP client configs keep working.
+
+### Streamable HTTP
+
+```bash
+ghostcloak-mcp --transport http
+# or via config:  [server] transport = "http"
+```
+
+Listens on `http://127.0.0.1:8787/mcp` by default.
+
+Client configuration (Claude Code `.mcp.json`, Cursor, opencode, …):
+
+```json
+{
+  "mcpServers": {
+    "ghostfox-http": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": { "Authorization": "Bearer <your-api-key>" }
+    }
+  }
+}
+```
+
+The API key is auto-generated on first start (256-bit random, stored in
+`~/.ghostfox/config.toml` with `0600` permissions) or set explicitly — see
+below.
+
+### both (stdio + HTTP in one process)
+
+```bash
+ghostcloak-mcp --transport both
+```
+
+Both transports share the same `GhostcloakServer` state: one trust domain
+per process. All authenticated HTTP clients are inside that process's trust
+boundary.
+
+## Configuration
+
+Config file default: `~/.ghostfox/config.toml` (override with
+`GHOSTFOX_CONFIG=/path/to/config.toml`). Parent dir is created with safe
+permissions if missing.
+
+```toml
+[server]
+transport = "stdio"          # stdio | http | both
+
+[http]
+host = "127.0.0.1"           # default localhost — see security note below
+port = 8787
+endpoint = "/mcp"
+api_key = ""                 # empty → auto-generate 256-bit random key
+allowed_origins = []         # e.g. ["http://localhost:3000"]
+```
+
+Precedence (deterministic): **CLI > ENV > FILE > DEFAULT**
+
+| Setting | Env var | CLI flag |
+|---|---|---|
+| Config path | `GHOSTFOX_CONFIG` | `--config` |
+| Transport | `GHOSTFOX_TRANSPORT` | `--transport` |
+| HTTP host | `GHOSTFOX_HTTP_HOST` | `--http-host` |
+| HTTP port | `GHOSTFOX_HTTP_PORT` | `--http-port` |
+| HTTP endpoint | `GHOSTFOX_HTTP_ENDPOINT` | `--http-endpoint` |
+| API key | `GHOSTFOX_HTTP_API_KEY` | `--http-api-key` |
+| Allowed origins | `GHOSTFOX_HTTP_ALLOWED_ORIGINS` (comma-separated) | — |
+
+Invalid values (bad port, unknown transport, malformed TOML, invalid origin
+list) fail with a clear error at startup; a bad value in a *reloaded* file is
+ignored and the last known-good config stays active.
+
+### Hot reload
+
+The config file is re-checked every 5 seconds. These change live:
+
+- `http.api_key` (old key rejected, new key accepted — rotation)
+- `http.allowed_origins`
+
+Socket-affecting fields (`host`, `port`, `endpoint`) and `transport`
+**require a restart** — the server does not rebind sockets mid-flight.
+
+## Security
+
+- **API key authentication is mandatory for HTTP.** Every request to `/mcp`
+  must carry `Authorization: Bearer <key>`; missing/invalid → `401
+  Unauthorized` with a generic body (no key material leaked). Comparison is
+  constant-time (`subtle`).
+- **Origin validation.** Requests with an `Origin` header must match the
+  allowlist (`allowed_origins`); invalid → `403 Forbidden`. Requests without
+  an `Origin` (non-browser clients) are accepted per MCP protocol semantics.
+  Empty allowlist = accept all origins (server still requires the API key).
+- **Default bind: `127.0.0.1`** (localhost only), per MCP security
+  guidance. If you bind `0.0.0.0` the server logs a warning — the API key is
+  still enforced.
+- **No permissive CORS by default.** CORS is only as broad as your
+  allowlist; wildcard is never used for credentialed requests.
+- **API key ≠ TLS.** Authentication is not encryption. Remote deployments
+  must sit behind an HTTPS reverse proxy (nginx, Caddy, Traefik, Cloudflare
+  Tunnel):
+
+```
+Internet ──HTTPS──► nginx/Caddy ──► ghostfox :8787 (HTTP localhost)
+```
+
+- **`/healthz`** (unauthenticated liveness probe, returns 200) is the only
+  endpoint without auth — it exposes no internals and runs no MCP tools.
+
+## Docker
+
+```bash
+# HTTP mode inside a container (auth enforced)
+docker run --rm -p 8787:8787 \
+  -e GHOSTFOX_TRANSPORT=http \
+  -e GHOSTFOX_HTTP_HOST=0.0.0.0 \
+  -e GHOSTFOX_HTTP_PORT=8787 \
+  -e GHOSTFOX_HTTP_API_KEY='change-me' \
+  ghcr.io/ras-indo/ghostfox
+```
+
+The container default never exposes an unauthenticated MCP server: it
+requires `GHOSTFOX_TRANSPORT=http` (or `both`) *and* an API key. The
+image is built from the exact release artifacts of the matching version.
+
 ## Repository layout
 
 ````

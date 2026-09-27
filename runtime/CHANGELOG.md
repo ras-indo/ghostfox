@@ -5,6 +5,43 @@ All notable changes to ghostcloak will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-09-27
+
+### Added
+
+- **MCP Streamable HTTP transport** — `--transport http` (and `both`) serves the
+  same 42-tool MCP surface over `http://127.0.0.1:8787/mcp` via official rmcp
+  `StreamableHttpService`. Single endpoint, modern protocol semantics (no legacy
+  HTTP+SSE split).
+- **API-key authentication** — mandatory for HTTP: `Authorization: Bearer
+  <key>`; auto-generated 256-bit random key on first start, stored with `0600`
+  permissions; constant-time comparison; generic `401` on failure (no key
+  material leaked).
+- **Origin validation** — `allowed_origins` allowlist; invalid Origin → `403`;
+  requests without Origin (non-browser clients) accepted per protocol.
+- **Configuration system** — `~/.ghostfox/config.toml` (or `GHOSTFOX_CONFIG`),
+  precedence CLI > ENV > FILE > DEFAULT, strict parsing with clear errors.
+- **Hot reload** — 5s config poll; API key rotation and origin changes apply
+  live; invalid reloads keep the last known-good config. Socket fields require
+  restart.
+- **`/healthz`** — unauthenticated liveness probe (no auth, no tool calls, no
+  internals).
+- **Cross-platform CI** — fmt/clippy/test/release-build on Ubuntu, macOS,
+  Windows; package checks (npm + Python); Docker build.
+- **Deterministic release pipeline** — single `release.yml` DAG: exact-SHA
+  checkout, artifact-only flow, checksums + release manifest, all-or-nothing
+  release gate before GitHub Release / GHCR push.
+
+### Changed
+
+- `ghostcloak-mcp` binary is now a thin wrapper over the library crate; stdio
+  mode unchanged and fully backward compatible.
+
+### Security
+
+- API key never logged; no CORS wildcard for credentialed requests; localhost
+  default bind; docs for remote HTTPS reverse-proxy deployment.
+
 ## [0.1.0] — 2026-09-03
 
 First public release. Rust-native agent browser runtime with a patched-Firefox engine.

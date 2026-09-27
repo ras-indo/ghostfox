@@ -55,14 +55,14 @@ async fn ensure_files() -> Result<(PathBuf, PathBuf)> {
     let charset_path = dir.join("charset.txt");
     if !model_path.exists() {
         download(
-            "https://github.com/autokeren/ghostfox/releases/download/v0.6.7/common.onnx",
+            "https://github.com/ras-indo/ghostfox/releases/download/v0.7.3/common.onnx",
             &model_path,
         )
         .await?;
     }
     if !charset_path.exists() {
         download(
-            "https://github.com/autokeren/ghostfox/releases/download/v0.6.7/charset.txt",
+            "https://github.com/ras-indo/ghostfox/releases/download/v0.7.3/charset.txt",
             &charset_path,
         )
         .await?;

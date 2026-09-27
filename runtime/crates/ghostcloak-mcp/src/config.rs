@@ -123,10 +123,16 @@ fn config_path() -> PathBuf {
 
 fn load_file_config() -> Result<Config> {
     let path = config_path();
+    load_file_config_at(&path)
+}
+
+/// Load config from an explicit path (tests use this to avoid parallel
+/// env-var races on GHOSTFOX_CONFIG).
+fn load_file_config_at(path: &Path) -> Result<Config> {
     if !path.exists() {
         return Ok(Config::default());
     }
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config {}", path.display()))?;
     toml::from_str(&content).with_context(|| format!("failed to parse config {}", path.display()))
 }
@@ -276,6 +282,12 @@ pub struct ReloadTracker {
 impl ReloadTracker {
     pub fn new(cfg: Config) -> Self {
         let path = config_path();
+        Self::new_at(cfg, path)
+    }
+
+    /// Create a tracker watching an explicit config path (used by tests to
+    /// avoid parallel-test env-var races on GHOSTFOX_CONFIG).
+    pub fn new_at(cfg: Config, path: PathBuf) -> Self {
         let (last_modified, last_len) = file_fingerprint(&path);
         Self {
             path,
@@ -420,11 +432,11 @@ mod tests {
 
         std::env::set_var("GHOSTFOX_CONFIG", path.to_str().unwrap());
 
-        let cfg = load_file_config().unwrap();
+        let cfg = load_file_config_at(&path).unwrap();
         assert_eq!(cfg.server.transport, Transport::Stdio);
 
         // Modify
-        let mut tracker = ReloadTracker::new(cfg);
+        let mut tracker = ReloadTracker::new_at(cfg, path.clone());
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(
             &path,
@@ -445,8 +457,8 @@ mod tests {
         std::fs::write(&path, "[server]\ntransport = \"stdio\"").unwrap();
         std::env::set_var("GHOSTFOX_CONFIG", path.to_str().unwrap());
 
-        let cfg = load_file_config().unwrap();
-        let mut tracker = ReloadTracker::new(cfg);
+        let cfg = load_file_config_at(&path).unwrap();
+        let mut tracker = ReloadTracker::new_at(cfg, path.clone());
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(&path, "this is not valid {{{{").unwrap();
 

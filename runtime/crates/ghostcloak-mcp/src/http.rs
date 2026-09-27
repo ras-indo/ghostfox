@@ -44,14 +44,21 @@ impl AppState {
 }
 
 /// Build the Axum router with auth middleware and MCP endpoint.
+///
+/// Auth is applied ONLY to the MCP endpoint via `route_layer`. `/healthz`
+/// must stay unauthenticated (liveness probe; it exposes no internals and
+/// calls no MCP tools).
 pub fn build_router(state: AppState, endpoint: &str) -> Router {
-    Router::new()
+    let mcp_route = Router::new()
         .route(endpoint, get(mcp_handler).post(mcp_handler))
-        .route("/healthz", get(healthz))
-        .layer(middleware::from_fn_with_state(
+        .route_layer(middleware::from_fn_with_state(
             state.auth.clone(),
             auth_middleware,
-        ))
+        ));
+
+    Router::new()
+        .route("/healthz", get(healthz))
+        .merge(mcp_route)
         .with_state(state)
 }
 

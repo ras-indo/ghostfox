@@ -7,8 +7,7 @@ use std::sync::Arc;
 use axum::middleware;
 use axum::Router;
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager,
-    tower::StreamableHttpService,
+    session::local::LocalSessionManager, tower::StreamableHttpService,
 };
 use rmcp::transport::StreamableHttpServerConfig;
 use tokio::net::TcpListener;

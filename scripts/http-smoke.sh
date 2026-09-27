@@ -70,7 +70,7 @@ CODE=$(curl -s -o /tmp/gf_init_body -D /tmp/gf_init_hdr -w '%{http_code}' \
   -X POST \
   -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-smoke","version":"0.0.0"}}}' \
   "$BASE")
 if [ "$CODE" != "200" ]; then
@@ -98,7 +98,7 @@ CODE=$(curl -s -o /tmp/gf_tools -w '%{http_code}' \
   -H "Authorization: Bearer $KEY" \
   -H "mcp-session-id: $SID" \
   -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
   "$BASE")
 if [ "$CODE" != "200" ]; then

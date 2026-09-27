@@ -519,17 +519,18 @@ mod tests2 {
                 )
                 .to_image();
                 let d2 = siamese_prep(&crop);
-                let in1 = m.siamese.node_id("input").unwrap();
-                let in2 = m.siamese.node_id("input.53").unwrap();
-                let out_id = m.siamese.output_ids()[0];
-                let out = m
-                    .siamese
+                let mut session = m.siamese.lock().unwrap();
+                let in1 = session.node_id("input").unwrap();
+                let in2 = session.node_id("input.53").unwrap();
+                let out_id = session.output_ids()[0];
+                let out = session
                     .run(
                         vec![(in1, d1.as_view().into()), (in2, d2.into())],
                         &[out_id],
                         None,
                     )
                     .unwrap();
+                drop(session);
                 let v = out[0].as_view();
                 let sim = match &v {
                     rten::ValueView::FloatTensor(tv) => {

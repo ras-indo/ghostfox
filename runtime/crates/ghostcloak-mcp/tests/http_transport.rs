@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Integration tests for the HTTP transport.
 //!
 //! These tests verify:

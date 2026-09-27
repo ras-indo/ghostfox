@@ -122,7 +122,7 @@ async fn run_http(cfg: Config) -> Result<()> {
     let server = GhostcloakServer::new();
     let mut tracker = ReloadTracker::new(cfg.clone());
 
-    let handle = http::start_http_server(&cfg.http, server).await?;
+    let mut handle = http::start_http_server(&cfg.http, server).await?;
 
     // Wait for shutdown signal, checking config reload periodically
     let reload_interval = std::time::Duration::from_secs(5);
@@ -163,7 +163,7 @@ async fn run_both(cfg: Config) -> Result<()> {
 
     // Start stdio server in a separate task
     let stdio_server = GhostcloakServer::new();
-    let stdio_handle = tokio::spawn(async move {
+    let mut stdio_handle = tokio::spawn(async move {
         let service = serve_server(stdio_server, stdio())
             .await
             .expect("failed to start stdio MCP server in both mode");

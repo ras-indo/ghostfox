@@ -18,7 +18,7 @@ mod liveview;
 #[allow(dead_code, unused_imports, unused_variables, unused_mut)]
 mod ocr;
 #[allow(dead_code, unused_imports, unused_variables, unused_mut)]
-mod recording;
+pub mod recording;
 mod server;
 
 pub use server::GhostcloakServer;

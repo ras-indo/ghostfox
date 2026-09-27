@@ -62,19 +62,24 @@ jobs:
               cp /target/release/ghostcloak-mcp /out/ghostcloak-mcp
             '
           sudo chown "$(id -u):$(id -g)" /tmp/gf-out/ghostcloak-mcp
-          ls -la /tmp/gf-out/ghostcloak-mcp
+          # Rename with arch suffix so both x86_64 and arm64 coexist in release
+          if [ -n "${{ matrix.suffix }}" ]; then
+            cp /tmp/gf-out/ghostcloak-mcp "/tmp/gf-out/ghostcloak-mcp${{ matrix.suffix }}"
+            ls -la "/tmp/gf-out/ghostcloak-mcp${{ matrix.suffix }}"
+          else
+            ls -la /tmp/gf-out/ghostcloak-mcp
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ghostcloak-mcp-${{ matrix.arch }}-${{ github.run_id }}
-          path: /tmp/gf-out/ghostcloak-mcp
+          path: /tmp/gf-out/ghostcloak-mcp${{ matrix.suffix }}
           retention-days: 7
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: /tmp/gf-out/ghostcloak-mcp
-          asset_name: ghostcloak-mcp${{ matrix.suffix }}
+          files: /tmp/gf-out/ghostcloak-mcp${{ matrix.suffix }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

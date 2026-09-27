@@ -114,10 +114,7 @@ mod tests {
     #[test]
     fn bearer_key_case_insensitive_scheme() {
         let mut h = HeaderMap::new();
-        h.insert(
-            header::AUTHORIZATION,
-            "bearer lower-case".parse().unwrap(),
-        );
+        h.insert(header::AUTHORIZATION, "bearer lower-case".parse().unwrap());
         assert_eq!(bearer_key(&h), Some("lower-case"));
     }
 }

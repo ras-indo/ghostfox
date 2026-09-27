@@ -30,9 +30,7 @@ use server::GhostcloakServer;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()))
         .with_writer(std::io::stderr)
         .init();
 
@@ -76,13 +74,9 @@ async fn run_stdio(server: GhostcloakServer) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_both(
-    store: Arc<ConfigStore>,
-    server: GhostcloakServer,
-) -> anyhow::Result<()> {
+async fn run_both(store: Arc<ConfigStore>, server: GhostcloakServer) -> anyhow::Result<()> {
     let cfg = store.current().await;
-    let addr = http::bind_addr(&cfg.http.host, cfg.http.port)
-        .map_err(anyhow::Error::msg)?;
+    let addr = http::bind_addr(&cfg.http.host, cfg.http.port).map_err(anyhow::Error::msg)?;
 
     if http::is_non_loopback(&addr) {
         warn!(

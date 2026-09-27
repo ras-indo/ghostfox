@@ -6,14 +6,14 @@ pub async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut terminate = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
-            Ok(sig) => sig,
-            Err(_) => {
-                let _ = ctrl_c.await;
-                return;
-            }
-        };
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(sig) => sig,
+                Err(_) => {
+                    let _ = ctrl_c.await;
+                    return;
+                }
+            };
         tokio::select! {
             _ = ctrl_c => {}
             _ = terminate.recv() => {}

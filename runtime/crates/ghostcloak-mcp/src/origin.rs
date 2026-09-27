@@ -31,9 +31,7 @@ pub async fn origin_middleware(
     next: Next,
 ) -> Response {
     let cfg = store.current().await;
-    let origin = headers
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok());
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
 
     if origin_allowed(origin, &cfg.http.allowed_origins) {
         next.run(request).await

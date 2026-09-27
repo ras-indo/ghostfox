@@ -144,19 +144,20 @@ impl FileConfig {
     pub fn load_optional(path: &Path) -> Result<Option<Self>, ConfigError> {
         match Self::load(path) {
             Ok(cfg) => Ok(Some(cfg)),
-            Err(ConfigError::Read {
-                ref source, ..
-            }) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(ConfigError::Read { ref source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
             Err(e) => Err(e),
         }
     }
 
     fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text =
-            fs::read_to_string(path).map_err(|source| ConfigError::Read {
-                path: path.to_path_buf(),
-                source,
-            })?;
+        let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
         Self::parse(&text, path)
     }
 
@@ -236,11 +237,7 @@ pub enum ConfigError {
 // ── precedence merge ─────────────────────────────────────────────────────────
 
 /// Merge DEFAULT → FILE → ENV → CLI into a resolved [`Config`].
-pub fn resolve(
-    cli: &Cli,
-    env: &EnvVars,
-    file: Option<&FileConfig>,
-) -> Result<Config, ConfigError> {
+pub fn resolve(cli: &Cli, env: &EnvVars, file: Option<&FileConfig>) -> Result<Config, ConfigError> {
     let mut cfg = Config::default();
 
     // 1. File (all fields optional; absent = keep default)
@@ -323,8 +320,7 @@ pub fn resolve_config_path(cli: &Cli, env: &EnvVars) -> Option<PathBuf> {
 
 /// `~/.ghostfox/config.toml` (or platform equivalent).
 fn default_config_path() -> Option<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(DEFAULT_CONFIG_DIR).join(DEFAULT_CONFIG_FILE))
+    dirs::home_dir().map(|h| h.join(DEFAULT_CONFIG_DIR).join(DEFAULT_CONFIG_FILE))
 }
 
 // ── API key generation ───────────────────────────────────────────────────────
@@ -345,10 +341,7 @@ pub fn atomic_write(path: &Path, contents: &str) -> Result<(), ConfigError> {
         source,
     })?;
 
-    let tmp = dir.join(format!(
-        ".config-{}.tmp",
-        std::process::id()
-    ));
+    let tmp = dir.join(format!(".config-{}.tmp", std::process::id()));
 
     let mut f = fs::File::create(&tmp).map_err(|source| ConfigError::Write {
         path: path.to_path_buf(),
@@ -422,9 +415,7 @@ impl ConfigStore {
     /// random one and persist it to the config file (atomic write,
     /// `0600`).  If the key came from the environment or CLI the file
     /// is never touched.
-    pub async fn ensure_api_key(
-        &self,
-    ) -> Result<(), ConfigError> {
+    pub async fn ensure_api_key(&self) -> Result<(), ConfigError> {
         let cfg = self.config.read().await.clone();
         if !cfg.transport.uses_http() || !cfg.http.api_key.is_empty() {
             return Ok(());
@@ -459,9 +450,7 @@ impl ConfigStore {
                 "generated API key and persisted to config file"
             );
         } else {
-            warn!(
-                "generated API key but no config path to persist it (in-memory only)"
-            );
+            warn!("generated API key but no config path to persist it (in-memory only)");
         }
 
         *self.config.write().await = new_cfg;
@@ -486,9 +475,7 @@ impl ConfigStore {
             applied.transport = cur.transport;
         }
         if new_cfg.http.host != cur.http.host || new_cfg.http.port != cur.http.port {
-            warn!(
-                "HTTP bind address change requires a restart; ignoring"
-            );
+            warn!("HTTP bind address change requires a restart; ignoring");
             applied.http.host = cur.http.host.clone();
             applied.http.port = cur.http.port;
         }
@@ -551,9 +538,7 @@ fn parse_port(s: &str) -> Result<u16, ConfigError> {
 
 fn validate_port(v: u16) -> Result<u16, ConfigError> {
     if v == 0 {
-        Err(ConfigError::InvalidPort {
-            value: "0".into(),
-        })
+        Err(ConfigError::InvalidPort { value: "0".into() })
     } else {
         Ok(v)
     }
@@ -632,7 +617,10 @@ endpoint = "/mcp"
         assert_eq!(h.api_key.as_deref(), Some("key123"));
         assert_eq!(
             h.allowed_origins.as_deref(),
-            Some(&["http://localhost:3000".to_string(), "http://example.com".to_string()])
+            Some(&[
+                "http://localhost:3000".to_string(),
+                "http://example.com".to_string()
+            ])
         );
     }
 
@@ -651,10 +639,7 @@ transport = "stdio"
 bogus = 42
 "#;
         let f = FileConfig::parse(text, Path::new("/test.toml")).unwrap();
-        assert_eq!(
-            f.server.unwrap().transport.as_deref(),
-            Some("stdio")
-        );
+        assert_eq!(f.server.unwrap().transport.as_deref(), Some("stdio"));
     }
 
     #[test]
@@ -774,7 +759,9 @@ bogus = 42
         let k1 = generate_api_key();
         let k2 = generate_api_key();
         assert_eq!(k1.len(), 43);
-        assert!(k1.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(k1
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         assert_ne!(k1, k2);
     }
 
@@ -850,10 +837,7 @@ bogus = 42
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&path)
-                .unwrap()
-                .permissions()
-                .mode();
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
     }
@@ -862,11 +846,7 @@ bogus = 42
     async fn hot_reload_valid_change() {
         let d = tmp();
         let path = d.path().join("config.toml");
-        fs::write(
-            &path,
-            "[http]\napi_key = \"key-one-0123456789abcdef\"\n",
-        )
-        .unwrap();
+        fs::write(&path, "[http]\napi_key = \"key-one-0123456789abcdef\"\n").unwrap();
         let store = ConfigStore::new(
             Config {
                 transport: Transport::Http,
@@ -883,11 +863,7 @@ bogus = 42
         assert_eq!(cfg1.http.api_key, "key-one-0123456789abcdef");
 
         // Write new config with different key
-        fs::write(
-            &path,
-            "[http]\napi_key = \"key-two-aaaaaaaaaaaaaaaaaa\"\n",
-        )
-        .unwrap();
+        fs::write(&path, "[http]\napi_key = \"key-two-aaaaaaaaaaaaaaaaaa\"\n").unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let cfg2 = store.current().await;
@@ -898,11 +874,7 @@ bogus = 42
     async fn hot_reload_invalid_keeps_previous() {
         let d = tmp();
         let path = d.path().join("config.toml");
-        fs::write(
-            &path,
-            "[http]\napi_key = \"good-key-0123456789abcdef\"\n",
-        )
-        .unwrap();
+        fs::write(&path, "[http]\napi_key = \"good-key-0123456789abcdef\"\n").unwrap();
         let store = ConfigStore::new(
             Config {
                 transport: Transport::Http,

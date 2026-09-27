@@ -7,8 +7,7 @@ use std::sync::Arc;
 use axum::middleware;
 use axum::Router;
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig,
-    StreamableHttpService,
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -50,12 +49,9 @@ pub async fn serve(
 
     let mcp_service: StreamableHttpService<GhostcloakServer, LocalSessionManager> =
         StreamableHttpService::new(
-            move || -> std::result::Result<GhostcloakServer, rmcp::Error> {
-                Ok(server.clone())
-            },
+            move || -> std::result::Result<GhostcloakServer, rmcp::Error> { Ok(server.clone()) },
             LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default()
-                .with_cancellation_token(cancellation.clone()),
+            StreamableHttpServerConfig::default().with_cancellation_token(cancellation.clone()),
         );
 
     let app = Router::new()
@@ -72,14 +68,9 @@ pub async fn serve(
 }
 
 /// Standalone HTTP mode: bind, log, wait for shutdown signal.
-pub async fn run_http(
-    store: Arc<ConfigStore>,
-    server: GhostcloakServer,
-) -> anyhow::Result<()> {
+pub async fn run_http(store: Arc<ConfigStore>, server: GhostcloakServer) -> anyhow::Result<()> {
     let cfg = store.current().await;
-    let addr =
-        bind_addr(&cfg.http.host, cfg.http.port)
-            .map_err(anyhow::Error::msg)?;
+    let addr = bind_addr(&cfg.http.host, cfg.http.port).map_err(anyhow::Error::msg)?;
 
     if is_non_loopback(&addr) {
         warn!(

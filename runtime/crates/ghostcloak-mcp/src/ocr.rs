@@ -102,7 +102,10 @@ pub async fn ocr_png(png: &[u8]) -> Result<String> {
 }
 
 /// Shared: decode PNG -> OcrInput -> detect words -> group into lines.
-fn ocr_input_and_lines(eng: &OcrEngine, png: &[u8]) -> Result<(OcrInput, Vec<Vec<rten_imageproc::RotatedRect>>)> {
+fn ocr_input_and_lines(
+    eng: &OcrEngine,
+    png: &[u8],
+) -> Result<(OcrInput, Vec<Vec<rten_imageproc::RotatedRect>>)> {
     let img = image::load_from_memory(png).context("decoding PNG for OCR")?;
     let rgb = img.into_rgb8();
     let (w, h) = rgb.dimensions();

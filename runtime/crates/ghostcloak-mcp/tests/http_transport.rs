@@ -7,9 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ghostcloak_mcp::config::{
-    Config, ConfigStore, EnvVars, HttpConfig, Transport,
-};
+use ghostcloak_mcp::config::{Config, ConfigStore, EnvVars, HttpConfig, Transport};
 use ghostcloak_mcp::http;
 use ghostcloak_mcp::server::GhostcloakServer;
 
@@ -34,9 +32,7 @@ fn test_store(api_key: &str, allowed: Vec<String>) -> Arc<ConfigStore> {
 }
 
 async fn spawn_server(store: Arc<ConfigStore>) -> (String, tokio_util::sync::CancellationToken) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ct = tokio_util::sync::CancellationToken::new();
     let server = GhostcloakServer::new();
@@ -75,16 +71,21 @@ async fn auth_no_key_returns_401() {
     let (url, ct) = spawn_server(store).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let resp = mcp_post(&url, None, None, serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "test", "version": "0"}
-        }
-    }))
+    let resp = mcp_post(
+        &url,
+        None,
+        None,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        }),
+    )
     .await;
 
     assert_eq!(resp.status().as_u16(), 401);
@@ -98,16 +99,21 @@ async fn auth_wrong_key_returns_401() {
     let (url, ct) = spawn_server(store).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let resp = mcp_post(&url, Some("wrong-key"), None, serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "test", "version": "0"}
-        }
-    }))
+    let resp = mcp_post(
+        &url,
+        Some("wrong-key"),
+        None,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        }),
+    )
     .await;
 
     assert_eq!(resp.status().as_u16(), 401);
@@ -120,16 +126,21 @@ async fn auth_wrong_scheme_returns_401() {
     let (url, ct) = spawn_server(store).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let resp = mcp_post(&url, None, None, serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "test", "version": "0"}
-        }
-    }))
+    let resp = mcp_post(
+        &url,
+        None,
+        None,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        }),
+    )
     .await;
 
     // The function sends no auth header at all when key=None, so 401 is expected.
@@ -143,16 +154,21 @@ async fn auth_valid_key_succeeds() {
     let (url, ct) = spawn_server(store).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let resp = mcp_post(&url, Some("test-key"), None, serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "test", "version": "0"}
-        }
-    }))
+    let resp = mcp_post(
+        &url,
+        Some("test-key"),
+        None,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        }),
+    )
     .await;
 
     assert_eq!(resp.status().as_u16(), 200);
@@ -161,10 +177,7 @@ async fn auth_valid_key_succeeds() {
 
 #[tokio::test]
 async fn origin_denied_returns_403() {
-    let store = test_store(
-        "test-key",
-        vec!["http://localhost:3000".into()],
-    );
+    let store = test_store("test-key", vec!["http://localhost:3000".into()]);
     let (url, ct) = spawn_server(store).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -198,10 +211,7 @@ async fn origin_denied_returns_403() {
 
 #[tokio::test]
 async fn origin_allowed_succeeds() {
-    let store = test_store(
-        "test-key",
-        vec!["http://localhost:3000".into()],
-    );
+    let store = test_store("test-key", vec!["http://localhost:3000".into()]);
     let (url, ct) = spawn_server(store).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -235,23 +245,25 @@ async fn origin_allowed_succeeds() {
 
 #[tokio::test]
 async fn no_origin_header_passes() {
-    let store = test_store(
-        "test-key",
-        vec!["http://localhost:3000".into()],
-    );
+    let store = test_store("test-key", vec!["http://localhost:3000".into()]);
     let (url, ct) = spawn_server(store).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let resp = mcp_post(&url, Some("test-key"), None, serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "test", "version": "0"}
-        }
-    }))
+    let resp = mcp_post(
+        &url,
+        Some("test-key"),
+        None,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }
+        }),
+    )
     .await;
 
     assert_eq!(resp.status().as_u16(), 200);
@@ -340,11 +352,7 @@ async fn hot_reload_api_key_rotation() {
 
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("config.toml");
-    std::fs::write(
-        &path,
-        "[http]\napi_key = \"key-one-0123456789abcdef\"\n",
-    )
-    .unwrap();
+    std::fs::write(&path, "[http]\napi_key = \"key-one-0123456789abcdef\"\n").unwrap();
 
     let store = ConfigStore::new(
         Config {
@@ -381,11 +389,7 @@ async fn hot_reload_api_key_rotation() {
     assert_eq!(resp.status().as_u16(), 200);
 
     // Rotate to key-two
-    std::fs::write(
-        &path,
-        "[http]\napi_key = \"key-two-aaaaaaaaaaaaaaaaaa\"\n",
-    )
-    .unwrap();
+    std::fs::write(&path, "[http]\napi_key = \"key-two-aaaaaaaaaaaaaaaaaa\"\n").unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // key-one now rejected

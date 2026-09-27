@@ -352,6 +352,11 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    // Serialise tests that mutate process-wide env vars to avoid races.
+    // All env-using tests must lock ENV_LOCK before calling set_var.
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn default_config_is_stdio() {
         let cfg = Config::default();
@@ -386,6 +391,7 @@ mod tests {
 
     #[test]
     fn cli_precedence_over_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::set_var("GHOSTFOX_HTTP_PORT", "9000");
         let mut cfg = Config::default();
         apply_env(&mut cfg);
@@ -405,6 +411,7 @@ mod tests {
 
     #[test]
     fn env_overrides_file_default() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::set_var("GHOSTFOX_TRANSPORT", "http");
         std::env::set_var("GHOSTFOX_HTTP_PORT", "9999");
         let mut cfg = Config::default(); // simulates file config
@@ -425,10 +432,16 @@ mod tests {
 
     #[test]
     fn file_reload_detects_change() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, "[server]\ntransport = \"stdio\"").unwrap();
+
+        // Write initial config and close the file handle before proceeding
+        // so that platform-specific file-locking semantics cannot interfere.
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            writeln!(file, "[server]\ntransport = \"stdio\"").unwrap();
+        }
 
         std::env::set_var("GHOSTFOX_CONFIG", path.to_str().unwrap());
 
@@ -452,6 +465,7 @@ mod tests {
 
     #[test]
     fn invalid_hot_reload_keeps_previous() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[server]\ntransport = \"stdio\"").unwrap();

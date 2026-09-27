@@ -23,8 +23,7 @@ use image::imageops::FilterType;
 use rten::Model;
 use rten_tensor::Layout as _;
 
-const YOLO_URL: &str =
-    "https://github.com/ras-indo/ghostfox/releases/download/v0.7.3/yolov8s.onnx";
+const YOLO_URL: &str = "https://github.com/ras-indo/ghostfox/releases/download/v0.7.3/yolov8s.onnx";
 const SIAMESE_URL: &str =
     "https://github.com/ras-indo/ghostfox/releases/download/v0.7.3/siamese_float.onnx";
 /// The siamese ships dequantized (`siamese_float.onnx`) because the upstream

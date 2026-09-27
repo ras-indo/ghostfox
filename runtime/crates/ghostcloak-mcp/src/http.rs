@@ -50,14 +50,11 @@ pub async fn serve(
         StreamableHttpService::new(
             move || Ok(server.clone()),
             LocalSessionManager::default().into(),
-            StreamableHttpServerConfig {
-                cancellation_token: cancellation.clone(),
-                ..Default::default()
-            },
+            StreamableHttpServerConfig::default(),
         );
 
     let app = Router::new()
-        .nest_service(endpoint, mcp_service)
+        .nest_service(&endpoint, mcp_service)
         .layer(middleware::from_fn_with_state(
             store.clone(),
             origin_middleware,

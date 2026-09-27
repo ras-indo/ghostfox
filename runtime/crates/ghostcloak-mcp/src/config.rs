@@ -89,7 +89,7 @@ impl Default for ServerConfig {
 }
 
 /// Top-level config (maps to config.toml).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,

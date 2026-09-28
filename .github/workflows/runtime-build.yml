@@ -43,7 +43,7 @@ jobs:
             -v /tmp/gf-target:/target \
             -v /tmp/gf-out:/out \
             -e CARGO_HOME=/cargo \
-            ubuntu:24.04 \
+            ubuntu:22.04 \
             bash -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq >/dev/null 2>&1

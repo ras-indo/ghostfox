@@ -2,8 +2,9 @@ name: runtime-build
 
 # Builds the Rust MCP runtime (ghostcloak-mcp) as a release asset.
 #
-# Using ubuntu:20.04 (glibc 2.31) for maximum compatibility — the binary
-# runs on older Linux devices (Armbian, Debian, CentOS, etc.).
+# Using ubuntu:22.04 (glibc 2.35, GCC 11) for broad compatibility.
+# ort_sys pre-built onnxruntime needs C++17 features (GCC 11+).
+# glibc 2.35 runs on most Linux devices including Armbian/Debian.
 # The asset name must be exactly "ghostcloak-mcp" — the Dockerfile and
 # the Python SDK (ghostfox.install_runtime()) both look for that name.
 
@@ -40,7 +41,7 @@ jobs:
             -v /tmp/gf-target:/target \
             -v /tmp/gf-out:/out \
             -e CARGO_HOME=/cargo \
-            ubuntu:20.04 \
+            ubuntu:22.04 \
             bash -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq >/dev/null 2>&1

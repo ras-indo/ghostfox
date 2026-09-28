@@ -213,6 +213,31 @@ pub trait PageHandle: Send + Sync {
         ))
     }
 
+    /// Go back one history entry via the engine's NATIVE protocol call —
+    /// never `history.back()` in page JS, which wedges the content process.
+    /// Returns whether a previous entry existed.
+    async fn go_back(&self) -> Result<bool> {
+        Err(crate::error::GhostError::PageOp(
+            "go_back not supported by this engine".into(),
+        ))
+    }
+
+    /// Forward one history entry (native protocol call). Returns whether a
+    /// next entry existed.
+    async fn go_forward(&self) -> Result<bool> {
+        Err(crate::error::GhostError::PageOp(
+            "go_forward not supported by this engine".into(),
+        ))
+    }
+
+    /// Reload the page via the engine's NATIVE protocol call (safe during
+    /// load, unlike `location.reload()` through evaluate).
+    async fn reload_page(&self) -> Result<()> {
+        Err(crate::error::GhostError::PageOp(
+            "reload_page not supported by this engine".into(),
+        ))
+    }
+
     /// v0.7 DEBUG CORTEX: buffered console messages (log/warning/error)
     /// captured at the PROTOCOL level (Runtime.consoleAPICalled) — the
     /// page cannot hide or patch it. `clear` drains the buffer.

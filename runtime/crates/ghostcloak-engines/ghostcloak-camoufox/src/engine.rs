@@ -1508,6 +1508,19 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Wait (bounded) for a fresh execution context after a history move
+/// (back/forward/reload) — callers hand control back to MCP tools that
+/// fire evaluate immediately.
+async fn settle_context(page: &CamoufoxPage) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while page.execution_context_id.lock().await.is_none() {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 #[async_trait]
 
 impl PageHandle for CamoufoxPage {
@@ -1552,6 +1565,79 @@ impl PageHandle for CamoufoxPage {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         out
+    }
+
+    /// Go back one history entry via the engine's NATIVE protocol call —
+    /// never `history.back()` in page JS, which wedges the content process.
+    /// Returns whether a previous entry existed.
+    async fn go_back(&self) -> Result<bool> {
+        let sid = self.session_id().await?;
+        let frame = self.frame_id.lock().await.clone().unwrap_or_default();
+        // History move invalidates the execution context — drop it so any
+        // concurrent evaluate waits for the successor.
+        *self.execution_context_id.lock().await = None;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.conn.request_session(
+                "Page.goBack",
+                serde_json::json!({ "frameId": frame }),
+                Some(&sid),
+            ),
+        )
+        .await;
+        let success = match out {
+            Ok(Ok(v)) => v
+                .get("success")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(true),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => true, // response lost; navigation still proceeds
+        };
+        settle_context(self).await;
+        Ok(success)
+    }
+
+    async fn go_forward(&self) -> Result<bool> {
+        let sid = self.session_id().await?;
+        let frame = self.frame_id.lock().await.clone().unwrap_or_default();
+        *self.execution_context_id.lock().await = None;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.conn.request_session(
+                "Page.goForward",
+                serde_json::json!({ "frameId": frame }),
+                Some(&sid),
+            ),
+        )
+        .await;
+        let success = match out {
+            Ok(Ok(v)) => v
+                .get("success")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(true),
+            Ok(Err(e)) => return Err(e),
+            Err(_) => true,
+        };
+        settle_context(self).await;
+        Ok(success)
+    }
+
+    async fn reload_page(&self) -> Result<()> {
+        let sid = self.session_id().await?;
+        *self.execution_context_id.lock().await = None;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.conn
+                .request_session("Page.reload", serde_json::json!({}), Some(&sid)),
+        )
+        .await;
+        match out {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {} // response lost; reload still proceeds
+        }
+        settle_context(self).await;
+        Ok(())
     }
 
     async fn snapshot(&self) -> Result<PageSnapshot> {

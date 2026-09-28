@@ -124,6 +124,7 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
         "session_close",
         "session_list",
         "page_back",
+        "page_forward",
         "page_reload",
         "page_close",
     ] {
@@ -132,7 +133,7 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
     // Guard against accidental tool loss: this is the exact count currently
     // exposed by GhostcloakServer. If a tool is ever removed (or added),
     // update this list deliberately — never silently drop tools.
-    assert_eq!(names.len(), 47, "tools: {names:?}");
+    assert_eq!(names.len(), 48, "tools: {names:?}");
 
     let generated = request(
         &mut child,

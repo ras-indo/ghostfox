@@ -667,16 +667,15 @@ impl GhostcloakServer {
             .page(&page_id)
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
-        let can_go_back = page
-            .evaluate("history.length > 1")
+        // NATIVE Page.goBack — `history.back()` through evaluate wedges the
+        // content process (page stopped responding to every eval).
+        let went = page
+            .go_back()
             .await
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-        if can_go_back.as_bool() != Some(true) {
+        if !went {
             return Ok(text_result("no history to go back to"));
         }
-        page.evaluate("history.back()")
-            .await
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         wait_for_dom(&page).await;
         let url = page.url().await.unwrap_or_default();
         let _ = self.recorder.record(
@@ -689,7 +688,43 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Reload the current page (like the browser refresh button). Waits for the DOM to be ready afterwards. Returns the URL."
+        description = "Go FORWARD one history entry (after page_back). NATIVE engine call — returns 'nothing to go forward to' when at the end. Returns the URL."
+    )]
+    async fn page_forward(
+        &self,
+        Parameters(PageRefParams {
+            session_id,
+            page_id,
+        }): Parameters<PageRefParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let went = page
+            .go_forward()
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        if !went {
+            return Ok(text_result("nothing to go forward to"));
+        }
+        wait_for_dom(&page).await;
+        let url = page.url().await.unwrap_or_default();
+        let _ = self.recorder.record(
+            &session_id,
+            "page_forward",
+            Some(&page_id),
+            serde_json::json!({ "url": url }),
+        );
+        Ok(text_result(url))
+    }
+
+    #[tool(
+        description = "Reload the current page (like the browser refresh button). NATIVE engine call; waits for the DOM to be ready afterwards. Returns the URL."
     )]
     async fn page_reload(
         &self,
@@ -706,7 +741,9 @@ impl GhostcloakServer {
             .page(&page_id)
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
-        page.evaluate("location.reload()")
+        // NATIVE Page.reload — `location.reload()` through evaluate has the
+        // same wedge risk as history.back().
+        page.reload_page()
             .await
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         wait_for_dom(&page).await;

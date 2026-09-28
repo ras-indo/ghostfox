@@ -419,6 +419,25 @@ async fn wait_for_dom(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) {
     }
 }
 
+/// Read the page URL, tolerating the mid-commit window where a reload or
+/// history move still reports `about:blank` (poll up to ~6s).
+async fn settled_url(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) -> String {
+    for _ in 0..24 {
+        match page.url().await {
+            Ok(u) if u != "about:blank" && !u.is_empty() => return u,
+            Ok(u) => {
+                if u == "about:blank" {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                } else {
+                    return u;
+                }
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+        }
+    }
+    page.url().await.unwrap_or_default()
+}
+
 fn text_result(s: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![rmcp::model::Content::text(s.into())])
 }
@@ -677,7 +696,7 @@ impl GhostcloakServer {
             return Ok(text_result("no history to go back to"));
         }
         wait_for_dom(&page).await;
-        let url = page.url().await.unwrap_or_default();
+        let url = settled_url(&page).await;
         let _ = self.recorder.record(
             &session_id,
             "page_back",
@@ -713,7 +732,7 @@ impl GhostcloakServer {
             return Ok(text_result("nothing to go forward to"));
         }
         wait_for_dom(&page).await;
-        let url = page.url().await.unwrap_or_default();
+        let url = settled_url(&page).await;
         let _ = self.recorder.record(
             &session_id,
             "page_forward",
@@ -747,7 +766,7 @@ impl GhostcloakServer {
             .await
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         wait_for_dom(&page).await;
-        let url = page.url().await.unwrap_or_default();
+        let url = settled_url(&page).await;
         let _ = self.recorder.record(
             &session_id,
             "page_reload",
@@ -2765,7 +2784,7 @@ impl GhostcloakServer {
             .recorder
             .record_screenshot(&session_id, &page_id, &png)
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-        let url = page.url().await.unwrap_or_default();
+        let url = settled_url(&page).await;
         crate::liveview::update(&session_id, &page_id, &url, png);
         Ok(text_result(
             serde_json::to_string_pretty(&serde_json::json!({

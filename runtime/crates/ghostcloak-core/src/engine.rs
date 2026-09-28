@@ -38,6 +38,12 @@ pub struct LaunchOptions {
     pub headless: bool,
     /// Engine binary override; autodetected when absent.
     pub executable: Option<String>,
+    /// Pre-generated identity (TOML) to inject at launch. When set, the
+    /// engine uses THIS identity instead of generating a fresh one —
+    /// guaranteeing the fingerprint the caller recorded (evidence) is the
+    /// fingerprint the engine actually runs with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_toml: Option<String>,
 }
 
 /// The full a11y snapshot result: elements plus page metadata.

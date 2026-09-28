@@ -39,6 +39,10 @@ pub struct Geo {
 pub enum Platform {
     #[default]
     Windows,
+    // Explicit rename: serde's kebab-case turns "MacOS" into "mac-o-s",
+    // which no human or tool expects. Alias keeps old identity.toml files
+    // (written by the buggy serializer) parseable.
+    #[serde(rename = "macos", alias = "mac-o-s")]
     MacOS,
     Linux,
     /// Android phones (Firefox on Android personas: portrait screens,

@@ -39,9 +39,123 @@ pub struct CamoufoxEngine {
     contexts: tokio::sync::Mutex<std::collections::HashMap<String, (String, String)>>,
 }
 
+/// Parse a proxy URL: `socks5://host:port`, `socks://host:port`,
+/// `socks4://host:port`, `http(s)://host:port`, or bare `host:port`
+/// (treated as http). Returns (scheme, host, port).
+fn parse_proxy(raw: &str) -> Result<(&'static str, String, u16), String> {
+    let (scheme, rest) = match raw.find("://") {
+        Some(i) => {
+            let sc = match &raw[..i] {
+                "socks5" | "socks" => "socks5",
+                "socks4" => "socks4",
+                "http" => "http",
+                "https" => "https",
+                other => {
+                    return Err(format!(
+                        "unsupported scheme `{other}` — use socks5://host:port or http://host:port"
+                    ))
+                }
+            };
+            (sc, &raw[i + 3..])
+        }
+        None => ("http", raw),
+    };
+    // Strip optional userinfo (user:pass@host:port).
+    let rest = rest.rsplit('@').next().unwrap_or(rest);
+    let (host, port) = rest.rsplit_once(':').ok_or_else(|| {
+        format!("missing `:port` in `{raw}` (e.g. socks5://127.0.0.1:9050)")
+    })?;
+    let port: u16 = port
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid port in `{raw}`"))?;
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty() {
+        return Err(format!("missing host in `{raw}`"));
+    }
+    Ok((scheme, host.to_string(), port))
+}
+
+/// TCP reachability check for a proxy endpoint (host may be a name).
+fn probe_tcp(host: &str, port: u16, timeout: std::time::Duration) -> std::io::Result<()> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let addrs: Vec<_> = (host, port).to_socket_addrs()?.collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "host did not resolve",
+        ));
+    }
+    let mut last = std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no addresses");
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Write Firefox `network.proxy.*` prefs into the profile's user.js.
+/// Idempotent: a previously generated block (marker comments) is stripped
+/// first, so relaunching with a different proxy never leaves stale rules.
+fn write_proxy_prefs(profile: &std::path::Path, raw: &str) -> std::io::Result<()> {
+    let (scheme, host, port) = parse_proxy(raw).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+    })?;
+    let mut block = String::from("// GHOSTFOX-PROXY-BEGIN (generated, safe to replace)\n");
+    block.push_str("user_pref(\"network.proxy.type\", 1);\n"); // 1 = manual config
+    match scheme {
+        "socks5" | "socks4" => {
+            let version = if scheme == "socks4" { 4 } else { 5 };
+            block.push_str(&format!("user_pref(\"network.proxy.socks\", \"{host}\");\n"));
+            block.push_str(&format!("user_pref(\"network.proxy.socks_port\", {port});\n"));
+            block.push_str(&format!("user_pref(\"network.proxy.socks_version\", {version});\n"));
+            // Resolve .onion / remote hostnames through the proxy itself.
+            block.push_str("user_pref(\"network.proxy.socks_remote_dns\", true);\n");
+        }
+        _ => {
+            block.push_str(&format!("user_pref(\"network.proxy.http\", \"{host}\");\n"));
+            block.push_str(&format!("user_pref(\"network.proxy.http_port\", {port});\n"));
+            block.push_str(&format!("user_pref(\"network.proxy.ssl\", \"{host}\");\n"));
+            block.push_str(&format!("user_pref(\"network.proxy.ssl_port\", {port});\n"));
+        }
+    }
+    block.push_str("// GHOSTFOX-PROXY-END\n");
+
+    let path = profile.join("user.js");
+    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+    const BEGIN: &str = "// GHOSTFOX-PROXY-BEGIN";
+    const END: &str = "// GHOSTFOX-PROXY-END";
+    if let Some(start) = content.find(BEGIN) {
+        match content[start..].find(END) {
+            Some(rel) => {
+                let end = start + rel + END.len() + 1;
+                content.replace_range(start..end.min(content.len()), "");
+            }
+            None => content.truncate(start),
+        }
+    }
+    content.push_str(&block);
+    std::fs::write(&path, content)
+}
+
 impl CamoufoxEngine {
     pub async fn launch(opts: &LaunchOptions) -> Result<Arc<Self>> {
-        let identity = Identity::load_or_generate(opts.profile_dir.as_deref())?;
+        // Prefer the caller's pre-generated identity (identity_toml) so the
+        // fingerprint recorded in evidence is EXACTLY what the engine runs
+        // with. Fall back to load_or_generate only when none was provided —
+        // a silently re-randomized identity would break coherence (evidence
+        // says "Linux" while the runtime UA says "Android").
+        let identity: Identity = match opts
+            .identity_toml
+            .as_ref()
+            .filter(|t| !t.trim().is_empty())
+            .and_then(|t| toml::from_str::<Identity>(t).ok())
+        {
+            Some(id) => id,
+            None => Identity::load_or_generate(opts.profile_dir.as_deref())?,
+        };
         let (home, bin_name) = autodetect_engine().ok_or_else(|| {
             GhostError::EngineUnavailable("ghostfox/camoufox binary not found".into())
         })?;
@@ -152,17 +266,22 @@ impl CamoufoxEngine {
             cmd.arg("--headless");
         }
         if let Some(proxy) = &opts.proxy {
-            // Firefox-style: each proxy type is its own flag on the command
-            // line. Accept host:port or socks5://host:port.
-            let (flag, rest) = if let Some(r) = proxy.strip_prefix("socks5://") {
-                ("--socks-proxy", r)
-            } else if let Some(r) = proxy.strip_prefix("http://") {
-                ("--proxy-server", r)
-            } else {
-                ("--proxy-server", proxy.as_str())
-            };
-            cmd.arg(format!("{flag}={rest}"))
-                .arg("--proxy-bypass-list=<-loopback>");
+            // The engine has NO proxy CLI flags: --socks-proxy/--proxy-server
+            // were silently ignored (zero such strings exist in libxul), so
+            // the proxy param used to be accepted while traffic went DIRECT.
+            // Firefox routing is driven purely by network.proxy.* prefs —
+            // write them into the profile's user.js before launch.
+            write_proxy_prefs(&profile, proxy).map_err(|e| {
+                GhostError::Protocol(format!("proxy config `{proxy}`: {e}"))
+            })?;
+            // Probe the endpoint: a dead proxy used to be accepted silently
+            // and only failed later, at request time, on every navigation.
+            let (_, phost, pport) = parse_proxy(proxy).map_err(GhostError::Protocol)?;
+            probe_tcp(&phost, pport, std::time::Duration::from_secs(4)).map_err(|e| {
+                GhostError::Protocol(format!(
+                    "proxy `{proxy}` is not reachable ({e}) — refusing to start a session that cannot route traffic"
+                ))
+            })?;
         }
         for extra in &opts.extra_args {
             cmd.arg(extra);
@@ -2289,7 +2408,7 @@ impl PageHandle for CamoufoxPage {
             .unwrap_or(0);
         if len < text.chars().count() / 2 {
             return Err(GhostError::PageOp(format!(
-                "type_ref({r}) landed {len} of {} chars",
+                "type_ref({r}) landed {len} of {} chars — the ref is probably STALE (page changed since page_a11y): rerun page_a11y, get the new ref, retry",
                 text.chars().count()
             )));
         }

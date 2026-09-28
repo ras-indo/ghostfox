@@ -388,6 +388,12 @@ pub(crate) fn pixels_ref_js(r: &str, gw: u32, gh: u32) -> String {
     format!(
         r#"(function() {{
   var el = (window.__gfxRefs || new Map()).get({r});
+  // Fallback: treat the ref as a CSS selector. page_a11y only registers
+  // INTERACTIVE elements, so <img>/<canvas> (exactly what pixels wants)
+  // never got a ref — passing '#myImg' used to hard-fail as STALE-REF.
+  if (!el || !el.isConnected) {{
+    try {{ el = document.querySelector({r}); }} catch (e) {{ el = null; }}
+  }}
   if (!el || !el.isConnected) return 'STALE-REF';
   window.__pixResult = null;
   function finish(img, w, h) {{
@@ -460,6 +466,11 @@ pub(crate) fn contrast_ref_js(r: &str, gw: u32, gh: u32, radius: u32) -> String 
     format!(
         r#"(function() {{
   var el = (window.__gfxRefs || new Map()).get({r});
+  // CSS-selector fallback (see pixels_ref_js): <img>/<canvas> have no
+  // a11y ref, so '#myImg' must still resolve for contrast analysis.
+  if (!el || !el.isConnected) {{
+    try {{ el = document.querySelector({r}); }} catch (e) {{ el = null; }}
+  }}
   if (!el || !el.isConnected) return 'STALE-REF';
   window.__contrastResult = null;
   function finish(img, w, h) {{

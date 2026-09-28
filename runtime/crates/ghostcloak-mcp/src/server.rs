@@ -39,6 +39,11 @@ struct SessionEvidenceParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SessionCloseParams {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct RefParams {
     session_id: String,
     page_id: String,
@@ -100,6 +105,11 @@ struct NetParams {
     page_id: String,
     /// Optional URL substring filter (e.g. "geetest").
     filter: Option<String>,
+    /// Clear the capture buffer after reading (default false). The buffer
+    /// caps at 1000 entries — clear it between scenarios so old traffic
+    /// doesn't drown the requests you care about.
+    #[serde(default)]
+    clear: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -397,6 +407,18 @@ impl GhostcloakServer {
     }
 }
 
+/// Block until `document.body` exists (max ~15s) so callers never race a
+/// blank document: page_open/page_back/page_reload used to return before
+/// the DOM was parseable, failing every follow-up call.
+async fn wait_for_dom(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) {
+    for _ in 0..60 {
+        match page.evaluate("!!document.body").await {
+            Ok(v) if v.as_bool() == Some(true) => break,
+            _ => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+        }
+    }
+}
+
 fn text_result(s: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![rmcp::model::Content::text(s.into())])
 }
@@ -415,19 +437,32 @@ impl GhostcloakServer {
             headful,
         }): Parameters<SessionCreateParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
-        let gen_opts = ghostcloak_fingerprint::GenerateOptions {
-            platform: match platform.as_deref() {
-                Some("windows") => Some(ghostcloak_fingerprint::Platform::Windows),
-                Some("macos") => Some(ghostcloak_fingerprint::Platform::MacOS),
-                Some("linux") => Some(ghostcloak_fingerprint::Platform::Linux),
-                Some("android") => Some(ghostcloak_fingerprint::Platform::Android),
-                _ => None,
+        // Strict platform validation with friendly aliases: a typo used to
+        // fall through silently and generate a random identity (so "mac"
+        // gave you an Android phone).
+        let platform = match platform.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+            None => None,
+            Some(p) if p.is_empty() => None,
+            Some(p) => match p.as_str() {
+                "windows" | "win" => Some(ghostcloak_fingerprint::Platform::Windows),
+                "macos" | "mac" | "darwin" | "osx" => Some(ghostcloak_fingerprint::Platform::MacOS),
+                "linux" => Some(ghostcloak_fingerprint::Platform::Linux),
+                "android" | "mobile" => Some(ghostcloak_fingerprint::Platform::Android),
+                other => {
+                    return Err(rmcp::model::ErrorData::invalid_params(
+                        format!("invalid platform `{other}` — use windows | macos | linux | android"),
+                        None,
+                    ))
+                }
             },
+        };
+        let gen_opts = ghostcloak_fingerprint::GenerateOptions {
+            platform,
             webrtc: None,
         };
         let identity = ghostcloak_fingerprint::generate(&gen_opts);
 
-        let launch = ghostcloak_core::engine::LaunchOptions {
+        let mut launch = ghostcloak_core::engine::LaunchOptions {
             profile_dir,
             proxy,
             headless: !headful.unwrap_or(false),
@@ -453,6 +488,12 @@ impl GhostcloakServer {
                     .to_toml()
                     .map(|t| std::fs::write(&identity_file, t));
             }
+        }
+        // The engine MUST run with the identity we just generated (the one
+        // we record as evidence) — pass it explicitly so launch() never
+        // re-randomizes into a different fingerprint.
+        if launch.identity_toml.is_none() {
+            launch.identity_toml = identity.to_toml().ok();
         }
         let engine = ghostcloak_camoufox::launch(&launch)
             .await
@@ -491,12 +532,81 @@ impl GhostcloakServer {
     }
 
     #[tool(
+        description = "Close a browsing session: shuts down the engine process, frees its memory (RAM), and deletes its ephemeral profile. ALWAYS call this when done with a session — sessions that are never closed keep consuming hundreds of MB until the server restarts. Returns 'closed'."
+    )]
+    async fn session_close(
+        &self,
+        Parameters(SessionCloseParams { session_id }): Parameters<SessionCloseParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        // Remove from the registry FIRST so no new tool call can grab a
+        // handle mid-shutdown, then stop the engine (SIGTERM + profile
+        // cleanup happens inside shutdown()).
+        let session = self
+            .state
+            .write()
+            .await
+            .sessions
+            .remove(&session_id)
+            .ok_or_else(|| {
+                rmcp::model::ErrorData::invalid_params(format!("session `{session_id}` not found"), None)
+            })?;
+        let page_count = session.page_ids().await.len();
+        let shutdown_result = session.engine().shutdown().await;
+        let _ = self.recorder.record(
+            &session_id,
+            "session_close",
+            None,
+            serde_json::json!({ "pages": page_count }),
+        );
+        shutdown_result
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        Ok(text_result(format!("closed ({page_count} pages)")))
+    }
+
+    #[tool(
+        description = "List all active browsing sessions with their identity label and open page count. Use to find sessions that should be closed (session_close) — never leave idle sessions running."
+    )]
+    async fn session_list(&self) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let state = self.state.read().await;
+        let mut out = Vec::new();
+        for (id, sess) in state.sessions.iter() {
+            out.push(serde_json::json!({
+                "session_id": id,
+                "identity": sess.identity,
+                "pages": sess.page_ids().await.len(),
+            }));
+        }
+        drop(state);
+        Ok(text_result(
+            serde_json::to_string_pretty(&out).unwrap_or_default(),
+        ))
+    }
+
+    #[tool(
         description = "Navigate to a URL in an existing session. Returns a page_id (string) that must be passed to all subsequent page tools. Waits for the page to load. If the page has iframes or shadow DOM, use page_a11y instead of guessing CSS selectors. Example: page_open(session_id, 'https://example.com') returns a page_id like 'abc123'."
     )]
     async fn page_open(
         &self,
         Parameters(PageOpenParams { session_id, url }): Parameters<PageOpenParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        // Scheme allowlist: file:// let any authenticated client read local
+        // files (e.g. /etc/passwd) straight out of the browser; javascript:
+        // URLs execute in the page. Only real web content is allowed.
+        let scheme_ok = {
+            let u = url.trim().to_ascii_lowercase();
+            u.starts_with("http://")
+                || u.starts_with("https://")
+                || u.starts_with("about:")
+                || u.starts_with("data:text/html")
+        };
+        if !scheme_ok {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                format!(
+                    "URL scheme not allowed: `{url}` — use http:// or https:// (file:// and javascript: are blocked)"
+                ),
+                None,
+            ));
+        }
         let session = self
             .session(&session_id)
             .await
@@ -513,6 +623,19 @@ impl GhostcloakServer {
             .into_iter()
             .find(|id| !page_ids_before.contains(id))
             .unwrap_or_default();
+        // Wait for a usable DOM: returning before document.body exists made
+        // every follow-up call (page_a11y, page_eval) fail with
+        // "document.body is null" on slower loads.
+        if !new_id.is_empty() {
+            if let Ok(page) = session.page(&new_id).await {
+                for _ in 0..60 {
+                    match page.evaluate("!!document.body").await {
+                        Ok(v) if v.as_bool() == Some(true) => break,
+                        _ => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+                    }
+                }
+            }
+        }
         let _ = self.recorder.record(
             &session_id,
             "page_open",
@@ -520,6 +643,107 @@ impl GhostcloakServer {
             serde_json::json!({ "url": url }),
         );
         Ok(text_result(new_id))
+    }
+
+    #[tool(
+        description = "Go BACK one entry in this page's browser history (like the browser back button). Waits for the destination page's DOM to be ready. Returns the new URL."
+    )]
+    async fn page_back(
+        &self,
+        Parameters(PageRefParams {
+            session_id,
+            page_id,
+        }): Parameters<PageRefParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let can_go_back = page
+            .evaluate("history.length > 1")
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        if can_go_back.as_bool() != Some(true) {
+            return Ok(text_result("no history to go back to"));
+        }
+        page.evaluate("history.back()")
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        wait_for_dom(&page).await;
+        let url = page
+            .url()
+            .await
+            .unwrap_or_default();
+        let _ = self.recorder.record(
+            &session_id,
+            "page_back",
+            Some(&page_id),
+            serde_json::json!({ "url": url }),
+        );
+        Ok(text_result(url))
+    }
+
+    #[tool(
+        description = "Reload the current page (like the browser refresh button). Waits for the DOM to be ready afterwards. Returns the URL."
+    )]
+    async fn page_reload(
+        &self,
+        Parameters(PageRefParams {
+            session_id,
+            page_id,
+        }): Parameters<PageRefParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        page.evaluate("location.reload()")
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        wait_for_dom(&page).await;
+        let url = page.url().await.unwrap_or_default();
+        let _ = self.recorder.record(
+            &session_id,
+            "page_reload",
+            Some(&page_id),
+            serde_json::json!({ "url": url }),
+        );
+        Ok(text_result(url))
+    }
+
+    #[tool(
+        description = "Close a single page/tab in a session (frees its target). Use session_close to shut the whole session down."
+    )]
+    async fn page_close(
+        &self,
+        Parameters(PageRefParams {
+            session_id,
+            page_id,
+        }): Parameters<PageRefParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        session
+            .close_page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_close",
+            Some(&page_id),
+            serde_json::json!({}),
+        );
+        Ok(text_result(format!("page {page_id} closed")))
     }
 
     #[tool(
@@ -813,6 +1037,7 @@ impl GhostcloakServer {
             session_id,
             page_id,
             filter,
+            clear,
         }): Parameters<NetParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         let session = self
@@ -824,7 +1049,7 @@ impl GhostcloakServer {
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
         let entries = page
-            .net_read(false)
+            .net_read(clear.unwrap_or(false))
             .await
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         let filtered: Vec<serde_json::Value> = entries
@@ -979,6 +1204,9 @@ impl GhostcloakServer {
                 let js = format!(
                     r#"(function() {{
   var el = (window.__gfxRefs || new Map()).get({r});
+  if (!el || !el.isConnected) {{
+    try {{ el = document.querySelector({r}); }} catch (e) {{ el = null; }}
+  }}
   if (!el || !el.isConnected) return 'STALE-REF';
   var r = el.getBoundingClientRect();
   return JSON.stringify({{x: r.x, y: r.y, w: r.width, h: r.height, vw: window.innerWidth}});
@@ -1986,6 +2214,24 @@ impl GhostcloakServer {
             .evaluate(&expr)
             .await
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        // Surface real failures as errors instead of a fake success string:
+        // 'NOT-FOUND' used to come back as a normal result (isError=false),
+        // so callers believed an upload happened when nothing matched.
+        match result.as_str().unwrap_or("") {
+            "NOT-FOUND" => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!("selector not found: {selector} (need an input[type=file])"),
+                    None,
+                ))
+            }
+            "NOT-FILE-INPUT" => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!("element matched but is not input[type=file]: {selector}"),
+                    None,
+                ))
+            }
+            _ => {}
+        }
         let _ = self.recorder.record(
             &session_id,
             "page_upload_file",
@@ -2368,22 +2614,38 @@ impl GhostcloakServer {
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
         let result = page.evaluate(r#"(() => {
-            const patterns = ['accept','agree','got it','ok','close','dismiss','allow all','continue','not now','no thanks'];
-            const selectors = ['[aria-label*="close"]','[aria-label*="dismiss"]','[aria-label*="accept"]','[class*="cookie"] button','[class*="consent"] button','[role="dialog"] button'];
+            const phrases = ['accept all','allow all','accept cookies','accept cookie','i agree','agree','reject all','got it','dismiss','not now','no thanks','allow all','continue'];
+            const singles = ['ok','close','accept','agree'];
             const clicked = [];
+            const tryClick = (el, how) => {
+                const text = (el.textContent || '').trim().toLowerCase();
+                if (!text || text.length > 30) return false;
+                if (!el.offsetParent && getComputedStyle(el).position !== 'fixed') return false;
+                // phrases match by substring; single words only EXACTLY —
+                // substring 'ok' would otherwise match "cookies".
+                const hit = phrases.some(p => text.includes(p)) || singles.some(w => text === w);
+                if (!hit) return false;
+                el.click();
+                clicked.push({ how, text: text.slice(0, 25) });
+                return true;
+            };
+            // Pass 1: dialog/consent-scoped selectors (the original set).
+            const selectors = ['[aria-label*="close"]','[aria-label*="dismiss"]','[aria-label*="accept"]','[class*="cookie"] button','[class*="consent"] button','[role="dialog"] button'];
             for (const sel of selectors) {
                 try {
-                    const els = document.querySelectorAll(sel);
-                    for (const el of els) {
-                        if (!el.offsetParent) continue;
-                        const text = (el.textContent || '').toLowerCase().trim();
-                        if (text && patterns.some(p => text.includes(p)) && text.length < 30) {
-                            el.click(); clicked.push({selector: sel, text: text.slice(0,20)});
-                            if (clicked.length >= 3) break;
-                        }
+                    for (const el of document.querySelectorAll(sel)) {
+                        if (tryClick(el, sel) && clicked.length >= 3) return JSON.stringify({dismissed: clicked.length, details: clicked});
                     }
-                    if (clicked.length >= 3) break;
                 } catch(e) {}
+                if (clicked.length >= 3) break;
+            }
+            // Pass 2: ANY visible button whose TEXT matches (the old code
+            // could only click elements matching the narrow selectors above,
+            // so plain cookie banners with an "Accept" button were missed).
+            if (clicked.length === 0) {
+                for (const el of document.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"], a')) {
+                    if (tryClick(el, 'text-match') && clicked.length >= 3) break;
+                }
             }
             return JSON.stringify({dismissed: clicked.length, details: clicked});
         })()"#).await
@@ -2410,10 +2672,23 @@ impl GhostcloakServer {
             .page(&page_id)
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
-        let value = page
-            .evaluate(&expression)
-            .await
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        // Hard 20s cap: an expression like `while(true){}` otherwise blocks
+        // the call for ~100s (engine default) and leaves the page's event
+        // loop busy. Fail fast with an actionable message instead.
+        let value = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            page.evaluate(&expression),
+        )
+        .await
+        .map_err(|_| {
+            rmcp::model::ErrorData::internal_error(
+                "page_eval timed out after 20s — the expression probably blocks (infinite loop); \
+                 avoid while(true)/for(;;) and prefer incremental, awaitable expressions. \
+                 NOTE: the page may stay unresponsive until the loop ends.",
+                None,
+            )
+        })?
+        .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         let _ = self.recorder.record(
             &session_id,
             "page_eval",

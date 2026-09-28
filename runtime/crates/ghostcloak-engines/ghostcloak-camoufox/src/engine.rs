@@ -42,7 +42,7 @@ pub struct CamoufoxEngine {
 /// Parse a proxy URL: `socks5://host:port`, `socks://host:port`,
 /// `socks4://host:port`, `http(s)://host:port`, or bare `host:port`
 /// (treated as http). Returns (scheme, host, port).
-fn parse_proxy(raw: &str) -> Result<(&'static str, String, u16), String> {
+fn parse_proxy(raw: &str) -> std::result::Result<(&'static str, String, u16), String> {
     let (scheme, rest) = match raw.find("://") {
         Some(i) => {
             let sc = match &raw[..i] {
@@ -158,7 +158,7 @@ impl CamoufoxEngine {
             .identity_toml
             .as_ref()
             .filter(|t| !t.trim().is_empty())
-            .and_then(|t| toml::from_str::<Identity>(t).ok())
+            .and_then(|t| Identity::from_toml_str(t).ok())
         {
             Some(id) => id,
             None => Identity::load_or_generate(opts.profile_dir.as_deref())?,

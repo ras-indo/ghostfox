@@ -85,6 +85,12 @@ pub enum WebRtcPolicy {
 }
 
 impl Identity {
+    /// Load from a TOML string (e.g. an identity injected by the MCP layer
+    /// so the engine runs with EXACTLY the fingerprint that was recorded).
+    pub fn from_toml_str(raw: &str) -> anyhow::Result<Self> {
+        Ok(toml::from_str(raw)?)
+    }
+
     /// Load from a TOML file on disk.
     pub fn load_toml(path: &std::path::Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)?;

@@ -39,6 +39,12 @@ async fn download(url: &str, to: &PathBuf) -> Result<()> {
     let resp = reqwest::get(url)
         .await
         .map_err(|e| anyhow!("model download failed ({url}): {e}"))?;
+    // A 404 body ("Not Found", 9 bytes) must never be written to disk:
+    // the `exists()` guard below would then cache the corrupt file forever.
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(anyhow!("model download failed ({url}): HTTP {status}"));
+    }
     let bytes = resp
         .bytes()
         .await

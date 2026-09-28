@@ -1587,6 +1587,10 @@ async fn hc_detect_impl(
         let resp = reqwest::get(&url)
             .await
             .map_err(|e| anyhow!("zoo download failed: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow!("zoo download failed ({url}): HTTP {status}"));
+        }
         let bytes_dl = resp
             .bytes()
             .await

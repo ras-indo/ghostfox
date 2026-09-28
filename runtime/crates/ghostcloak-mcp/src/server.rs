@@ -450,7 +450,9 @@ impl GhostcloakServer {
                 "android" | "mobile" => Some(ghostcloak_fingerprint::Platform::Android),
                 other => {
                     return Err(rmcp::model::ErrorData::invalid_params(
-                        format!("invalid platform `{other}` — use windows | macos | linux | android"),
+                        format!(
+                            "invalid platform `{other}` — use windows | macos | linux | android"
+                        ),
                         None,
                     ))
                 }
@@ -548,7 +550,10 @@ impl GhostcloakServer {
             .sessions
             .remove(&session_id)
             .ok_or_else(|| {
-                rmcp::model::ErrorData::invalid_params(format!("session `{session_id}` not found"), None)
+                rmcp::model::ErrorData::invalid_params(
+                    format!("session `{session_id}` not found"),
+                    None,
+                )
             })?;
         let page_count = session.page_ids().await.len();
         let shutdown_result = session.engine().shutdown().await;
@@ -558,8 +563,7 @@ impl GhostcloakServer {
             None,
             serde_json::json!({ "pages": page_count }),
         );
-        shutdown_result
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        shutdown_result.map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         Ok(text_result(format!("closed ({page_count} pages)")))
     }
 
@@ -674,10 +678,7 @@ impl GhostcloakServer {
             .await
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         wait_for_dom(&page).await;
-        let url = page
-            .url()
-            .await
-            .unwrap_or_default();
+        let url = page.url().await.unwrap_or_default();
         let _ = self.recorder.record(
             &session_id,
             "page_back",

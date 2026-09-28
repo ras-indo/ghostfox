@@ -62,9 +62,9 @@ fn parse_proxy(raw: &str) -> Result<(&'static str, String, u16), String> {
     };
     // Strip optional userinfo (user:pass@host:port).
     let rest = rest.rsplit('@').next().unwrap_or(rest);
-    let (host, port) = rest.rsplit_once(':').ok_or_else(|| {
-        format!("missing `:port` in `{raw}` (e.g. socks5://127.0.0.1:9050)")
-    })?;
+    let (host, port) = rest
+        .rsplit_once(':')
+        .ok_or_else(|| format!("missing `:port` in `{raw}` (e.g. socks5://127.0.0.1:9050)"))?;
     let port: u16 = port
         .trim()
         .parse()
@@ -100,23 +100,30 @@ fn probe_tcp(host: &str, port: u16, timeout: std::time::Duration) -> std::io::Re
 /// Idempotent: a previously generated block (marker comments) is stripped
 /// first, so relaunching with a different proxy never leaves stale rules.
 fn write_proxy_prefs(profile: &std::path::Path, raw: &str) -> std::io::Result<()> {
-    let (scheme, host, port) = parse_proxy(raw).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
-    })?;
+    let (scheme, host, port) =
+        parse_proxy(raw).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let mut block = String::from("// GHOSTFOX-PROXY-BEGIN (generated, safe to replace)\n");
     block.push_str("user_pref(\"network.proxy.type\", 1);\n"); // 1 = manual config
     match scheme {
         "socks5" | "socks4" => {
             let version = if scheme == "socks4" { 4 } else { 5 };
-            block.push_str(&format!("user_pref(\"network.proxy.socks\", \"{host}\");\n"));
-            block.push_str(&format!("user_pref(\"network.proxy.socks_port\", {port});\n"));
-            block.push_str(&format!("user_pref(\"network.proxy.socks_version\", {version});\n"));
+            block.push_str(&format!(
+                "user_pref(\"network.proxy.socks\", \"{host}\");\n"
+            ));
+            block.push_str(&format!(
+                "user_pref(\"network.proxy.socks_port\", {port});\n"
+            ));
+            block.push_str(&format!(
+                "user_pref(\"network.proxy.socks_version\", {version});\n"
+            ));
             // Resolve .onion / remote hostnames through the proxy itself.
             block.push_str("user_pref(\"network.proxy.socks_remote_dns\", true);\n");
         }
         _ => {
             block.push_str(&format!("user_pref(\"network.proxy.http\", \"{host}\");\n"));
-            block.push_str(&format!("user_pref(\"network.proxy.http_port\", {port});\n"));
+            block.push_str(&format!(
+                "user_pref(\"network.proxy.http_port\", {port});\n"
+            ));
             block.push_str(&format!("user_pref(\"network.proxy.ssl\", \"{host}\");\n"));
             block.push_str(&format!("user_pref(\"network.proxy.ssl_port\", {port});\n"));
         }
@@ -271,9 +278,8 @@ impl CamoufoxEngine {
             // the proxy param used to be accepted while traffic went DIRECT.
             // Firefox routing is driven purely by network.proxy.* prefs —
             // write them into the profile's user.js before launch.
-            write_proxy_prefs(&profile, proxy).map_err(|e| {
-                GhostError::Protocol(format!("proxy config `{proxy}`: {e}"))
-            })?;
+            write_proxy_prefs(&profile, proxy)
+                .map_err(|e| GhostError::Protocol(format!("proxy config `{proxy}`: {e}")))?;
             // Probe the endpoint: a dead proxy used to be accepted silently
             // and only failed later, at request time, on every navigation.
             let (_, phost, pport) = parse_proxy(proxy).map_err(GhostError::Protocol)?;

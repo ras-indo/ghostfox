@@ -18,6 +18,8 @@ use crate::auth::{auth_middleware, AuthConfig};
 use crate::config::HttpConfig;
 use crate::server::GhostcloakServer;
 
+type SessionManager = rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+
 /// Shared application state for the HTTP server.
 #[derive(Clone)]
 pub struct AppState {
@@ -25,6 +27,10 @@ pub struct AppState {
     /// API key / allowed origins without rebuilding the router.
     pub auth: Arc<RwLock<AuthConfig>>,
     pub server: GhostcloakServer,
+    /// Shared session manager — MUST be created once and shared across all
+    /// requests, otherwise each request creates a fresh session store and
+    /// `initialize` sessions are lost immediately.
+    pub session_manager: Arc<SessionManager>,
 }
 
 impl AppState {
@@ -32,6 +38,7 @@ impl AppState {
         Self {
             auth: Arc::new(RwLock::new(AuthConfig::from_config(http))),
             server,
+            session_manager: Arc::new(SessionManager::default()),
         }
     }
 
@@ -82,9 +89,7 @@ async fn mcp_handler(State(state): State<AppState>, req: Request<Body>) -> impl 
     let server = state.server.clone();
     let service = rmcp::transport::streamable_http_server::tower::StreamableHttpService::new(
         move || Ok(server.clone()),
-        Arc::new(
-            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
-        ),
+        state.session_manager.clone(),
         rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig::default(),
     );
 

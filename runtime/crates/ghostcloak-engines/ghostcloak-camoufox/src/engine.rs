@@ -147,6 +147,32 @@ fn write_proxy_prefs(profile: &std::path::Path, raw: &str) -> std::io::Result<()
     std::fs::write(&path, content)
 }
 
+/// Juggler (Firefox) emits FLAT event params — `params.url`/`params.method`
+/// — unlike Chrome CDP where they nest under `params.request.*`. The old
+/// code only read the Chrome shape, so every captured url was `""` and
+/// every status `null`. Read both shapes.
+fn net_url(msg: &serde_json::Value) -> String {
+    msg.pointer("/params/url")
+        .or_else(|| msg.pointer("/params/request/url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn net_method(msg: &serde_json::Value) -> String {
+    msg.pointer("/params/method")
+        .or_else(|| msg.pointer("/params/request/method"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("GET")
+        .to_string()
+}
+
+fn net_status(msg: &serde_json::Value) -> Option<u64> {
+    msg.pointer("/params/status")
+        .or_else(|| msg.pointer("/params/response/status"))
+        .and_then(|v| v.as_u64())
+}
+
 impl CamoufoxEngine {
     pub async fn launch(opts: &LaunchOptions) -> Result<Arc<Self>> {
         // Prefer the caller's pre-generated identity (identity_toml) so the
@@ -958,16 +984,8 @@ impl Engine for CamoufoxEngine {
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("")
                                             .to_string();
-                                        let url2 = msg
-                                            .pointer("/params/request/url")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string();
-                                        let mth = msg
-                                            .pointer("/params/request/method")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("GET")
-                                            .to_string();
+                                        let url2 = net_url(&msg);
+                                        let mth = net_method(&msg);
                                         if !url2.starts_with("data:") && !rid.is_empty() {
                                             let mut n = buf.net.lock().unwrap();
                                             let mut ix = buf.net_index.lock().unwrap();
@@ -1005,9 +1023,7 @@ impl Engine for CamoufoxEngine {
                                             .and_then(|v| v.as_str())
                                             .unwrap_or("")
                                             .to_string();
-                                        let status = msg
-                                            .pointer("/params/response/status")
-                                            .and_then(|v| v.as_u64());
+                                        let status = net_status(&msg);
                                         if let (Some(ix_val), Ok(mut n)) = (
                                             buf.net_index.lock().unwrap().get(&rid).copied(),
                                             buf.net.try_lock(),
@@ -2116,16 +2132,8 @@ impl PageHandle for CamoufoxPage {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
-                                let url = msg
-                                    .pointer("/params/request/url")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let mth = msg
-                                    .pointer("/params/request/method")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("GET")
-                                    .to_string();
+                                let url = net_url(&msg);
+                                let mth = net_method(&msg);
                                 if url.starts_with("data:") {
                                     continue;
                                 }
@@ -2163,9 +2171,7 @@ impl PageHandle for CamoufoxPage {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
-                                let status = msg
-                                    .pointer("/params/response/status")
-                                    .and_then(|v| v.as_u64());
+                                let status = net_status(&msg);
                                 if let (Some(ix_val), Ok(mut n)) = (
                                     buf2.net_index.lock().unwrap().get(&rid).copied(),
                                     buf2.net.try_lock(),
@@ -2176,14 +2182,17 @@ impl PageHandle for CamoufoxPage {
                                     }
                                 }
                             }
-                            "Network.loadingFailed" => {
+                            // Juggler emits `requestFailed` (not Chrome's
+                            // `loadingFailed`); handle both shapes.
+                            "Network.loadingFailed" | "Network.requestFailed" => {
                                 let rid = msg
                                     .pointer("/params/requestId")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string();
                                 let err = msg
-                                    .pointer("/params/errorText")
+                                    .pointer("/params/errorCode")
+                                    .or_else(|| msg.pointer("/params/errorText"))
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
                                 if let (Some(ix_val), Ok(mut n)) = (

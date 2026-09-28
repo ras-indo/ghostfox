@@ -1586,10 +1586,7 @@ impl PageHandle for CamoufoxPage {
         )
         .await;
         let success = match out {
-            Ok(Ok(v)) => v
-                .get("success")
-                .and_then(|b| b.as_bool())
-                .unwrap_or(true),
+            Ok(Ok(v)) => v.get("success").and_then(|b| b.as_bool()).unwrap_or(true),
             Ok(Err(e)) => return Err(e),
             Err(_) => true, // response lost; navigation still proceeds
         };
@@ -1611,10 +1608,7 @@ impl PageHandle for CamoufoxPage {
         )
         .await;
         let success = match out {
-            Ok(Ok(v)) => v
-                .get("success")
-                .and_then(|b| b.as_bool())
-                .unwrap_or(true),
+            Ok(Ok(v)) => v.get("success").and_then(|b| b.as_bool()).unwrap_or(true),
             Ok(Err(e)) => return Err(e),
             Err(_) => true,
         };

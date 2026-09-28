@@ -2,9 +2,9 @@ name: runtime-build
 
 # Builds the Rust MCP runtime (ghostcloak-mcp) as a release asset.
 #
-# Using ubuntu:22.04 (glibc 2.35, GCC 11) for broad compatibility.
-# ort_sys pre-built onnxruntime needs C++17 features (GCC 11+).
-# glibc 2.35 runs on most Linux devices including Armbian/Debian.
+# Uses pre-built ONNX Runtime static libs (glibc 2.17) from
+# csukuangfj/onnxruntime-libs for maximum portability — the binary
+# runs on older Linux devices (Armbian, Debian, CentOS, etc.).
 # The asset name must be exactly "ghostcloak-mcp" — the Dockerfile and
 # the Python SDK (ghostfox.install_runtime()) both look for that name.
 
@@ -25,9 +25,11 @@ jobs:
           - arch: x86_64
             runner: ubuntu-latest
             suffix: ""
+            ort_arch: x64
           - arch: arm64
             runner: ubuntu-24.04-arm
             suffix: "-arm64"
+            ort_arch: aarch64
     runs-on: ${{ matrix.runner }}
     name: "runtime ${{ matrix.arch }}"
     steps:
@@ -41,23 +43,35 @@ jobs:
             -v /tmp/gf-target:/target \
             -v /tmp/gf-out:/out \
             -e CARGO_HOME=/cargo \
-            ubuntu:22.04 \
+            ubuntu:24.04 \
             bash -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq >/dev/null 2>&1
               apt-get install -y -qq --no-install-recommends \
-                curl ca-certificates build-essential pkg-config libssl-dev \
-                cmake protobuf-compiler >/dev/null 2>&1
+                curl ca-certificates build-essential pkg-config libssl-dev >/dev/null 2>&1
               export PATH="/cargo/bin:$PATH"
               if [ ! -x /cargo/bin/cargo ]; then
                 curl -sSf https://sh.rustup.rs -o /tmp/rustup.sh
                 sh /tmp/rustup.sh -y --default-toolchain stable --profile minimal --no-modify-path >/dev/null 2>&1
               fi
               rustup default stable >/dev/null 2>&1
+
+              # Download ONNX Runtime static libs (glibc 2.17 compatible)
+              echo "=== Downloading ONNX Runtime static libs for ${{ matrix.ort_arch }} ==="
+              ORT_VERSION="1.30.0"
+              ORT_URL="https://github.com/csukuangfj/onnxruntime-libs/releases/download/v${ORT_VERSION}/onnxruntime-linux-${{ matrix.ort_arch }}-static_lib-${ORT_VERSION}-glibc2_17.zip"
+              curl -fsSL "$ORT_URL" -o /tmp/ort.zip
+              mkdir -p /ort
+              unzip -q /tmp/ort.zip -d /ort
+              # Find the lib directory containing libonnxruntime.a
+              ORT_LIB=$(find /ort -name "libonnxruntime.a" -printf "%h\n" | head -1)
+              echo "ORT_LIB_PATH=$ORT_LIB"
+              ls -la "$ORT_LIB"/
+
               mkdir -p /work
               (cd /src && tar --exclude=./target -cf - .) | tar -xf - -C /work
               cd /work
-              cargo build --release -p ghostcloak-mcp --target-dir /target 2>&1 | tail -5
+              ORT_LIB_PATH="$ORT_LIB" cargo build --release -p ghostcloak-mcp --target-dir /target 2>&1 | tail -20
               strip /target/release/ghostcloak-mcp
               cp /target/release/ghostcloak-mcp /out/ghostcloak-mcp
             '

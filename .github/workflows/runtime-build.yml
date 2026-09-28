@@ -46,7 +46,8 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq >/dev/null 2>&1
               apt-get install -y -qq --no-install-recommends \
-                curl ca-certificates build-essential pkg-config libssl-dev >/dev/null 2>&1
+                curl ca-certificates build-essential pkg-config libssl-dev \
+                cmake protobuf-compiler >/dev/null 2>&1
               export PATH="/cargo/bin:$PATH"
               if [ ! -x /cargo/bin/cargo ]; then
                 curl -sSf https://sh.rustup.rs -o /tmp/rustup.sh

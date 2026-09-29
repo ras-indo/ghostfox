@@ -3196,12 +3196,26 @@ impl GhostcloakServer {
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         let expr = SEARCH_JS
             .replace("@@PAT@@", &js_escape(&pattern))
-            .replace("@@ISRE@@", if regex.unwrap_or(false) { "true" } else { "false" })
+            .replace(
+                "@@ISRE@@",
+                if regex.unwrap_or(false) {
+                    "true"
+                } else {
+                    "false"
+                },
+            )
             .replace(
                 "@@CS@@",
-                if case_sensitive.unwrap_or(false) { "true" } else { "false" },
+                if case_sensitive.unwrap_or(false) {
+                    "true"
+                } else {
+                    "false"
+                },
             )
-            .replace("@@SCOPE@@", &js_escape(&css_scope.clone().unwrap_or_default()))
+            .replace(
+                "@@SCOPE@@",
+                &js_escape(&css_scope.clone().unwrap_or_default()),
+            )
             .replace("@@CTX@@", &context_chars.unwrap_or(150).to_string())
             .replace("@@MAX@@", &max_results.unwrap_or(25).to_string());
         let r = self
@@ -3248,7 +3262,11 @@ impl GhostcloakServer {
             .replace("@@MAX@@", &max_results.unwrap_or(50).to_string())
             .replace(
                 "@@TEXT@@",
-                if include_text.unwrap_or(true) { "true" } else { "false" },
+                if include_text.unwrap_or(true) {
+                    "true"
+                } else {
+                    "false"
+                },
             )
             .replace("@@ATTRS@@", &attrs_json);
         let r = self
@@ -3296,8 +3314,14 @@ impl GhostcloakServer {
         let expr = DROPDOWN_JS
             .replace("@@SEL@@", &js_escape(&selector))
             .replace("@@ACT@@", &js_escape(&act))
-            .replace("@@TXT@@", &serde_json::to_string(&text).unwrap_or_else(|_| "null".into()))
-            .replace("@@VAL@@", &serde_json::to_string(&value).unwrap_or_else(|_| "null".into()));
+            .replace(
+                "@@TXT@@",
+                &serde_json::to_string(&text).unwrap_or_else(|_| "null".into()),
+            )
+            .replace(
+                "@@VAL@@",
+                &serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
+            );
         let r = self
             .page_eval(Parameters(PageEvalParams {
                 session_id: session_id.clone(),

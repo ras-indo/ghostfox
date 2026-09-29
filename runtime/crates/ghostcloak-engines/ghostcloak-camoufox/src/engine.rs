@@ -2623,52 +2623,42 @@ impl PageHandle for CamoufoxPage {
         let st2 = st.clone();
         tokio::spawn(async move {
             let mut rx = conn.subscribe();
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => {
-                        let evt_sid = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
-                        if evt_sid != sid {
-                            continue;
-                        }
-                        match msg.get("method").and_then(|m| m.as_str()) {
-                            Some("Page.dialogOpened") => {
-                                let p = msg.get("params").cloned().unwrap_or(serde_json::json!({}));
-                                let dialog_id = p
-                                    .get("dialogId")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_string();
-                                if dialog_id.is_empty() {
-                                    continue;
-                                }
-                                let (accept, prompt) = {
-                                    let pol = st2.policy.lock().unwrap();
-                                    (pol.accept, pol.prompt_text.clone())
-                                };
-                                let mut hp =
-                                    serde_json::json!({ "dialogId": dialog_id, "accept": accept });
-                                if accept {
-                                    if let Some(t) = &prompt {
-                                        hp["promptText"] = serde_json::json!(t);
-                                    }
-                                }
-                                let handled = conn
-                                    .request_session("Page.handleDialog", hp, Some(&sid))
-                                    .await
-                                    .is_ok();
-                                st2.log.lock().unwrap().push(serde_json::json!({
-                                    "id": dialog_id,
-                                    "type": p.get("type").cloned().unwrap_or(serde_json::json!(null)),
-                                    "message": p.get("message").and_then(|v| v.as_str()).unwrap_or(""),
-                                    "accepted": accept,
-                                    "handled": handled,
-                                    "ts": now_ms(),
-                                }));
-                            }
-                            Some("Page.dialogClosed") | Some(_) | None => {}
-                        }
+            while let Ok(msg) = rx.recv().await {
+                let evt_sid = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+                if evt_sid != sid {
+                    continue;
+                }
+                if let Some("Page.dialogOpened") = msg.get("method").and_then(|m| m.as_str()) {
+                    let p = msg.get("params").cloned().unwrap_or(serde_json::json!({}));
+                    let dialog_id = p
+                        .get("dialogId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    if dialog_id.is_empty() {
+                        continue;
                     }
-                    Err(_) => break,
+                    let (accept, prompt) = {
+                        let pol = st2.policy.lock().unwrap();
+                        (pol.accept, pol.prompt_text.clone())
+                    };
+                    let mut hp = serde_json::json!({ "dialogId": dialog_id, "accept": accept });
+                    let answer = if accept { prompt.as_deref() } else { None };
+                    if let Some(t) = answer {
+                        hp["promptText"] = serde_json::json!(t);
+                    }
+                    let handled = conn
+                        .request_session("Page.handleDialog", hp, Some(&sid))
+                        .await
+                        .is_ok();
+                    st2.log.lock().unwrap().push(serde_json::json!({
+                        "id": dialog_id,
+                        "type": p.get("type").cloned().unwrap_or(serde_json::json!(null)),
+                        "message": p.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                        "accepted": accept,
+                        "handled": handled,
+                        "ts": now_ms(),
+                    }));
                 }
             }
         });

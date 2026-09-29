@@ -397,6 +397,102 @@ struct IdentityAuditParams {
     identity_toml: String,
 }
 
+// ===== BATCH TOOLS (added 2026-09-29: extraction/scraping/debug layer) =====
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ExtractParams {
+    session_id: String,
+    page_id: String,
+    /// CSS selector targeting specific elements (tables, lists, anything).
+    /// Omit for auto-detection of every table + list on the page.
+    #[serde(default)]
+    selector: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MarkdownParams {
+    session_id: String,
+    page_id: String,
+    /// CSS selector of the subtree to convert (e.g. "article"). Omit to
+    /// auto-pick article > main > body.
+    #[serde(default)]
+    selector: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BatchParams {
+    session_id: String,
+    page_id: String,
+    /// Ordered actions, e.g. [{"action":"click","selector":"#go"},
+    /// {"action":"type","selector":"input","text":"hi"},
+    /// {"action":"eval","expression":"document.title"}].
+    /// Actions: click | click_ref | type | fill | press | eval | wait |
+    /// move_to | back | forward | reload.
+    actions: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct IdleParams {
+    session_id: String,
+    page_id: String,
+    /// Max total wait in ms (default 15000).
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    /// Quiet period with zero new responses, in ms (default 800).
+    #[serde(default)]
+    idle_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TokensParams {
+    session_id: String,
+    page_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AntiBotParams {
+    session_id: String,
+    page_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct StorageParams {
+    session_id: String,
+    page_id: String,
+    /// get (default) | set | clear | keys
+    #[serde(default)]
+    op: Option<String>,
+    /// local (localStorage, default) | session (sessionStorage) | cookie
+    #[serde(default)]
+    area: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct HttpParams {
+    session_id: String,
+    page_id: String,
+    /// URL to fetch FROM THE PAGE CONTEXT (cookies + page origin apply;
+    /// cross-origin still subject to CORS, same-origin/API pivots always work).
+    url: String,
+    /// GET (default) | POST | PUT | PATCH | DELETE
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    body: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct HarParams {
+    session_id: String,
+    page_id: String,
+}
+
 #[derive(Clone, Default)]
 pub struct GhostcloakServer {
     state: Arc<tokio::sync::RwLock<ServerState>>,
@@ -458,6 +554,156 @@ async fn settled_url(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) -> Str
 fn text_result(s: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![rmcp::model::Content::text(s.into())])
 }
+
+/// Escape a Rust string for embedding inside a double-quoted JS string.
+fn js_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "")
+}
+
+const EXTRACT_JS: &str = r#"(()=>{
+  const sel = "@@SEL@@";
+  const txt = e => (e.innerText || '').trim();
+  const out = { tables: [], lists: [], items: [] };
+  const tbl = t => ({
+    caption: t.caption ? txt(t.caption) : null,
+    headers: [...(t.tHead && t.tHead.rows.length ? t.tHead.rows[0].cells
+              : (t.rows.length ? t.rows[0].cells : []))].map(txt),
+    rows: [...t.rows].map(r => [...r.cells].map(txt))
+  });
+  const nodes = sel ? [...document.querySelectorAll(sel)]
+                    : [...document.querySelectorAll('table,ul,ol')];
+  for (const e of nodes) {
+    if (e.tagName === 'TABLE') out.tables.push(tbl(e));
+    else if (e.tagName === 'UL' || e.tagName === 'OL')
+      out.lists.push({ ordered: e.tagName === 'OL',
+        items: [...e.children].filter(c => c.tagName === 'LI').map(txt) });
+    else out.items.push({ tag: e.tagName.toLowerCase(), text: txt(e).slice(0, 2000),
+        href: e.href || null, src: e.src || null,
+        value: ('value' in e) ? String(e.value).slice(0, 2000) : null });
+  }
+  return { tables: out.tables.slice(0, 50), lists: out.lists.slice(0, 50),
+    items: out.items.slice(0, 500),
+    counts: { tables: out.tables.length, lists: out.lists.length,
+      items: out.items.length } };
+})()"#;
+
+const MARKDOWN_JS: &str = r#"(()=>{
+  const sel = "@@SEL@@";
+  const root = sel ? document.querySelector(sel)
+    : (document.querySelector('article') || document.querySelector('main') || document.body);
+  if (!root) return { error: 'no root element' };
+  const conv = n => {
+    if (n.nodeType === 3) return n.textContent.replace(/\s+/g, ' ');
+    if (n.nodeType !== 1) return '';
+    const t = n.tagName;
+    if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SVG)$/.test(t)) return '';
+    const c = [...n.childNodes].map(conv).join('');
+    if (/^H[1-6]$/.test(t)) return '\n\n' + '#'.repeat(+t[1]) + ' ' + c.trim() + '\n';
+    if (t === 'P') return '\n\n' + c.trim() + '\n';
+    if (t === 'A') return '[' + c.trim() + '](' + (n.href || '') + ')';
+    if (t === 'STRONG' || t === 'B') return '**' + c + '**';
+    if (t === 'EM' || t === 'I') return '*' + c + '*';
+    if (t === 'CODE') return '`' + c + '`';
+    if (t === 'PRE') return '\n\n```\n' + n.innerText.replace(/\n$/, '') + '\n```\n';
+    if (t === 'BLOCKQUOTE') return '\n\n> ' + c.trim().replace(/\n/g, '\n> ') + '\n';
+    if (t === 'BR') return '\n';
+    if (t === 'HR') return '\n\n---\n';
+    if (t === 'IMG') return '![' + (n.alt || '') + '](' + (n.src || '') + ')';
+    if (t === 'LI') return '\n- ' + c.trim();
+    if (t === 'OL') return '\n' + [...n.children].map((li, i) =>
+      '\n' + (i + 1) + '. ' + li.innerText.trim()).join('') + '\n';
+    if (t === 'UL') return '\n' + [...n.children].map(li =>
+      '\n- ' + li.innerText.trim()).join('') + '\n';
+    if (t === 'TABLE') {
+      const rows = [...t.rows].map(r => [...r.cells].map(
+        x => x.innerText.trim().replace(/\|/g, '\\|')));
+      if (!rows.length) return '';
+      const head = rows[0], body = rows.slice(1);
+      const line = r => '| ' + r.join(' | ') + ' |';
+      return '\n\n' + line(head) + '\n|' + head.map(() => '---').join('|')
+        + '|\n' + body.map(line).join('\n') + '\n';
+    }
+    return c;
+  };
+  let md = (document.title ? '# ' + document.title + '\n' : '') + conv(root);
+  md = md.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return { markdown: md.slice(0, 300000), chars: md.length };
+})()"#;
+
+const TOKENS_JS: &str = r#"(()=>{
+  const found = [];
+  const push = (where, raw) => {
+    if (typeof raw !== 'string' || raw.length < 16) return;
+    const jwt = raw.match(/eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g);
+    if (jwt) for (const t of jwt)
+      found.push({ kind: 'jwt', where, preview: t.slice(0, 16) + '…', len: t.length });
+    if (/^(sk-|pk_|ghp_|gho_|ghu_|xoxb-|xoxp-|AKIA[0-9A-Z]{12})/.test(raw))
+      found.push({ kind: 'api-key-pattern', where, preview: raw.slice(0, 10) + '…', len: raw.length });
+    else if (/^[0-9a-f]{40,}$/i.test(raw) && raw.length >= 40)
+      found.push({ kind: 'hex-token', where, preview: raw.slice(0, 12) + '…', len: raw.length });
+  };
+  for (const [area, store] of [['localStorage', localStorage], ['sessionStorage', sessionStorage]]) {
+    try { for (let i = 0; i < store.length; i++) {
+      const k = store.key(i); push(area + ':' + k, store.getItem(k));
+    } } catch (e) {}
+  }
+  try { document.cookie.split('; ').forEach(p => {
+    const eq = p.indexOf('='); if (eq > 0) push('cookie:' + p.slice(0, eq), p.slice(eq + 1));
+  }); } catch (e) {}
+  document.querySelectorAll('meta[name*="csrf" i],meta[name*="token" i],meta[name*="key" i]')
+    .forEach(m => push('meta:' + m.getAttribute('name'), m.content || ''));
+  document.querySelectorAll('input[type="hidden"]')
+    .forEach(inp => push('input:' + (inp.name || inp.id || '?'), inp.value || ''));
+  return { count: found.length, tokens: found.slice(0, 200),
+    note: 'values are redacted — previews only, full secrets never leave the page' };
+})()"#;
+
+const ANTIBOT_JS: &str = r#"(()=>{
+  const f = [];
+  const add = (level, msg) => f.push({ level, msg });
+  if (navigator.webdriver) add('critical', 'navigator.webdriver = true');
+  if (/HeadlessChrome|PhantomJS|Playwright/i.test(navigator.userAgent))
+    add('critical', 'headless/automation user-agent');
+  let html = '';
+  try { html = document.documentElement.outerHTML.slice(0, 2000000); } catch (e) {}
+  const widgets = [['cf-chl', 'cloudflare challenge'], ['cf_turnstile', 'cloudflare turnstile'],
+    ['turnstile', 'turnstile'], ['hcaptcha', 'hCaptcha'], ['g-recaptcha', 'Google reCAPTCHA'],
+    ['geetest', 'GeeTest'], ['altcha', 'ALTCHA'], ['funcaptcha', 'FunCaptcha'],
+    ['arkoselabs', 'Arkose'], ['text-captcha', 'text captcha'], ['_7fb9', 'antibot script'],
+    ['datadome', 'DataDome'], ['perimeterx', 'PerimeterX'], ['shape-fp', 'Shape'],
+    ['kasada', 'Kasada'], ['queue-it', 'queue-it'], ['imperva', 'Imperva/Incapsula'],
+    ['recaptcha/api', 'recaptcha script'], ['challenges.cloudflare.com', 'CF challenge iframe']];
+  for (const [n, label] of widgets) if (html.includes(n)) add('info', label + ' detected');
+  const ifr = [...document.querySelectorAll('iframe')].map(x => x.src || '').join(' ');
+  if (/hcaptcha\.com|recaptcha|challenges\.cloudflare\.com|geetest/.test(ifr))
+    add('info', 'challenge iframe present');
+  try {
+    if (!navigator.plugins || navigator.plugins.length === 0)
+      add('warn', 'no browser plugins (headless-like)');
+  } catch (e) {}
+  try {
+    if (!navigator.languages || navigator.languages.length === 0)
+      add('warn', 'empty navigator.languages');
+  } catch (e) {}
+  try {
+    const c = document.createElement('canvas'); const gl = c.getContext('webgl');
+    if (!gl) add('warn', 'WebGL unavailable (fingerprint signal)');
+  } catch (e) {}
+  let score = 0;
+  for (const x of f) score += x.level === 'critical' ? 40 : (x.level === 'warn' ? 15 : 5);
+  score = Math.min(100, score);
+  return { score, risk: score >= 55 ? 'high' : (score >= 25 ? 'medium' : 'low'),
+    findings: f, ua: navigator.userAgent,
+    webdriver: !!navigator.webdriver,
+    hw_concurrency: navigator.hardwareConcurrency,
+    device_memory: navigator.deviceMemory || null,
+    screen: screen.width + 'x' + screen.height + '@' + (window.devicePixelRatio || 1),
+    timezone: (Intl.DateTimeFormat().resolvedOptions() || {}).timeZone || null,
+    platform: navigator.platform, languages: navigator.languages };
+})()"#;
 
 #[tool_router]
 impl GhostcloakServer {
@@ -1383,6 +1629,607 @@ impl GhostcloakServer {
         );
         Ok(text_result(
             serde_json::to_string_pretty(&boxes).unwrap_or_default(),
+        ))
+    }
+
+    // ===== BATCH TOOLS (2026-09-29: extraction/scraping/debug layer) =====
+
+    #[tool(
+        description = "STRUCTURED EXTRACT: pull data out of the page as JSON. Auto mode (no selector) finds every table (headers+rows) and list; with a selector it extracts matched elements {tag, text, href, src, value}. One call replaces manual scraping loops. Returns {tables, lists, items, counts}."
+    )]
+    async fn page_extract(
+        &self,
+        Parameters(ExtractParams {
+            session_id,
+            page_id,
+            selector,
+        }): Parameters<ExtractParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let sel = selector.unwrap_or_default();
+        let expr = EXTRACT_JS.replace("@@SEL@@", &js_escape(&sel));
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_extract",
+            Some(&page_id),
+            serde_json::json!({ "selector": sel }),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "PAGE TO MARKDOWN: convert the page (or a subtree via selector) into clean Markdown — headings, links, lists, code, tables, images. Auto-picks article > main > body. Token-friendly way to feed a whole page to an LLM. Returns {markdown, chars}."
+    )]
+    async fn page_markdown(
+        &self,
+        Parameters(MarkdownParams {
+            session_id,
+            page_id,
+            selector,
+        }): Parameters<MarkdownParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let sel = selector.unwrap_or_default();
+        let expr = MARKDOWN_JS.replace("@@SEL@@", &js_escape(&sel));
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_markdown",
+            Some(&page_id),
+            serde_json::json!({ "selector": sel }),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "BATCH ACTIONS: run an ordered list of page actions in ONE MCP call (fewer round-trips). actions: [{action, ...}] where action = click (selector|ref), click_ref (ref), type (selector+text), fill (selector+text), press (key), eval (expression), wait (selector, timeout_ms?), move_to (ref), back, forward, reload. Stops at the first failure and reports which step broke."
+    )]
+    async fn page_batch(
+        &self,
+        Parameters(BatchParams {
+            session_id,
+            page_id,
+            actions,
+        }): Parameters<BatchParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        if actions.is_empty() {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "actions must not be empty",
+                None,
+            ));
+        }
+        let mut done: Vec<serde_json::Value> = Vec::new();
+        for (i, a) in actions.iter().enumerate() {
+            let action = a.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let gs = |k: &str| a.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let res: Result<CallToolResult, rmcp::model::ErrorData> = match action {
+                "click" => match (gs("selector"), gs("ref")) {
+                    (Some(sel), _) => {
+                        self.page_click(Parameters(PageClickParams {
+                            session_id: session_id.clone(),
+                            page_id: page_id.clone(),
+                            selector: sel,
+                        }))
+                        .await
+                    }
+                    (None, Some(rf)) => {
+                        self.page_click_ref(Parameters(RefParams {
+                            session_id: session_id.clone(),
+                            page_id: page_id.clone(),
+                            r#ref: rf,
+                        }))
+                        .await
+                    }
+                    _ => Err(rmcp::model::ErrorData::invalid_params(
+                        "click needs selector or ref",
+                        None,
+                    )),
+                },
+                "click_ref" => match gs("ref") {
+                    Some(rf) => {
+                        self.page_click_ref(Parameters(RefParams {
+                            session_id: session_id.clone(),
+                            page_id: page_id.clone(),
+                            r#ref: rf,
+                        }))
+                        .await
+                    }
+                    None => Err(rmcp::model::ErrorData::invalid_params(
+                        "click_ref needs ref",
+                        None,
+                    )),
+                },
+                "type" => match (gs("selector"), gs("text")) {
+                    (Some(sel), Some(text)) => {
+                        self.page_type(Parameters(PageTypeParams {
+                            session_id: session_id.clone(),
+                            page_id: page_id.clone(),
+                            selector: sel,
+                            text,
+                        }))
+                        .await
+                    }
+                    _ => Err(rmcp::model::ErrorData::invalid_params(
+                        "type needs selector + text",
+                        None,
+                    )),
+                },
+                "fill" => match (gs("selector"), gs("text")) {
+                    (Some(sel), Some(text)) => {
+                        self.page_fill(Parameters(PageFillParams {
+                            session_id: session_id.clone(),
+                            page_id: page_id.clone(),
+                            selector: sel,
+                            text,
+                        }))
+                        .await
+                    }
+                    _ => Err(rmcp::model::ErrorData::invalid_params(
+                        "fill needs selector + text",
+                        None,
+                    )),
+                },
+                "press" => match gs("key") {
+                    Some(key) => {
+                        self.page_press(Parameters(PagePressParams {
+                            session_id: session_id.clone(),
+                            page_id: page_id.clone(),
+                            key,
+                        }))
+                        .await
+                    }
+                    None => Err(rmcp::model::ErrorData::invalid_params(
+                        "press needs key",
+                        None,
+                    )),
+                },
+                "eval" => match gs("expression") {
+                    Some(expression) => {
+                        self.page_eval(Parameters(PageEvalParams {
+                            session_id: session_id.clone(),
+                            page_id: page_id.clone(),
+                            expression,
+                        }))
+                        .await
+                    }
+                    None => Err(rmcp::model::ErrorData::invalid_params(
+                        "eval needs expression",
+                        None,
+                    )),
+                },
+                "wait" => match gs("selector") {
+                    Some(selector) => {
+                        self.page_wait_for(Parameters(WaitForParams {
+                            session_id: session_id.clone(),
+                            page_id: page_id.clone(),
+                            selector,
+                            timeout_ms: a.get("timeout_ms").and_then(|v| v.as_u64()),
+                        }))
+                        .await
+                    }
+                    None => Err(rmcp::model::ErrorData::invalid_params(
+                        "wait needs selector",
+                        None,
+                    )),
+                },
+                "move_to" => match gs("ref") {
+                    Some(rf) => {
+                        self.page_move_to(Parameters(RefParams {
+                            session_id: session_id.clone(),
+                            page_id: page_id.clone(),
+                            r#ref: rf,
+                        }))
+                        .await
+                    }
+                    None => Err(rmcp::model::ErrorData::invalid_params(
+                        "move_to needs ref",
+                        None,
+                    )),
+                },
+                "back" => {
+                    self.page_back(Parameters(PageRefParams {
+                        session_id: session_id.clone(),
+                        page_id: page_id.clone(),
+                    }))
+                    .await
+                }
+                "forward" => {
+                    self.page_forward(Parameters(PageRefParams {
+                        session_id: session_id.clone(),
+                        page_id: page_id.clone(),
+                    }))
+                    .await
+                }
+                "reload" => {
+                    self.page_reload(Parameters(PageRefParams {
+                        session_id: session_id.clone(),
+                        page_id: page_id.clone(),
+                    }))
+                    .await
+                }
+                other => Err(rmcp::model::ErrorData::invalid_params(
+                    format!("unknown action '{other}' at index {i}"),
+                    None,
+                )),
+            };
+            match res {
+                Ok(_) => done.push(serde_json::json!({ "i": i, "action": action, "ok": true })),
+                Err(e) => {
+                    return Err(rmcp::model::ErrorData::internal_error(
+                        format!("action #{i} ({action}) failed: {}", e.message),
+                        None,
+                    ))
+                }
+            }
+        }
+        let _ = self.recorder.record(
+            &session_id,
+            "page_batch",
+            Some(&page_id),
+            serde_json::json!({ "steps": done.len() }),
+        );
+        Ok(text_result(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "completed": done.len(),
+                "steps": done,
+            }))
+            .unwrap_or_default(),
+        ))
+    }
+
+    #[tool(
+        description = "WAIT FOR NETWORK IDLE: block until no new HTTP responses arrive for idle_ms (default 800ms), max timeout_ms (default 15000). Replaces manual sleeps after navigation/AJAX — returns {idle, responses, waited_ms}. Requires nothing extra; capture buffer is auto-started."
+    )]
+    async fn page_wait_for_idle(
+        &self,
+        Parameters(IdleParams {
+            session_id,
+            page_id,
+            timeout_ms,
+            idle_ms,
+        }): Parameters<IdleParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(15_000));
+        let quiet = std::time::Duration::from_millis(idle_ms.unwrap_or(800));
+        let start = std::time::Instant::now();
+        let mut last_count: Option<usize> = None;
+        let mut last_change = std::time::Instant::now();
+        loop {
+            let entries = page
+                .net_read(false)
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            let c = entries.len();
+            if last_count != Some(c) {
+                last_count = Some(c);
+                last_change = std::time::Instant::now();
+            }
+            if last_change.elapsed() >= quiet {
+                return Ok(text_result(
+                    serde_json::json!({
+                        "idle": true,
+                        "responses": c,
+                        "waited_ms": start.elapsed().as_millis(),
+                    })
+                    .to_string(),
+                ));
+            }
+            if start.elapsed() >= timeout {
+                return Ok(text_result(
+                    serde_json::json!({
+                        "idle": false,
+                        "responses": c,
+                        "waited_ms": start.elapsed().as_millis(),
+                        "note": "timeout — traffic still arriving",
+                    })
+                    .to_string(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+    }
+
+    #[tool(
+        description = "TOKEN HUNTER: scan localStorage, sessionStorage, cookies, CSRF metas and hidden inputs for JWTs / API-key patterns. Values are REDACTED (preview + length only) — never returns the full secret. For auditing what credentials a page holds."
+    )]
+    async fn extract_tokens(
+        &self,
+        Parameters(TokensParams {
+            session_id,
+            page_id,
+        }): Parameters<TokensParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: TOKENS_JS.to_string(),
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "extract_tokens",
+            Some(&page_id),
+            serde_json::json!({}),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "ANTI-BOT RECON: score the page's bot-detection surface 0-100 — identifies active widgets (Cloudflare, hCaptcha, reCAPTCHA, GeeTest, DataDome, PerimeterX, Imperva, Kasada…), headless signals (webdriver, UA, plugins, languages, WebGL) and returns fingerprint basics (UA, screen, timezone, hw). risk = low|medium|high."
+    )]
+    async fn detect_anti_bot(
+        &self,
+        Parameters(AntiBotParams {
+            session_id,
+            page_id,
+        }): Parameters<AntiBotParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: ANTIBOT_JS.to_string(),
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "detect_anti_bot",
+            Some(&page_id),
+            serde_json::json!({}),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "WEB STORAGE: read/write browser storage from the page. op = get | set | clear | keys; area = local (localStorage, default) | session (sessionStorage) | cookie. get with key returns the value (null if absent); cookie without key returns the full cookie string; keys lists names."
+    )]
+    async fn page_storage(
+        &self,
+        Parameters(StorageParams {
+            session_id,
+            page_id,
+            op,
+            area,
+            key,
+            value,
+        }): Parameters<StorageParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let op = op.unwrap_or_else(|| "get".to_string());
+        let area = area.unwrap_or_else(|| "local".to_string());
+        let expr = match (area.as_str(), op.as_str()) {
+            ("cookie", "keys") => {
+                "JSON.stringify(document.cookie.split('; ').map(c=>c.slice(0,Math.max(0,c.indexOf('=')))))"
+                    .to_string()
+            }
+            ("cookie", "set") => match (&key, &value) {
+                (Some(k), Some(v)) => format!(
+                    "(()=>{{document.cookie=\"{}={};path=/;max-age=31536000;SameSite=Lax\";return 'ok'}})()",
+                    js_escape(k),
+                    js_escape(v)
+                ),
+                _ => {
+                    return Err(rmcp::model::ErrorData::invalid_params(
+                        "cookie set needs key + value",
+                        None,
+                    ))
+                }
+            },
+            ("cookie", "clear") => {
+                "(()=>{const all=document.cookie.split('; ');for(const c of all){const eq=c.indexOf('=');document.cookie=c.slice(0,Math.max(0,eq))+'=;path=/;max-age=0';}return 'cleared '+all.length})()"
+                    .to_string()
+            }
+            ("cookie", _) => match &key {
+                Some(k) => format!(
+                    "(()=>{{const n='{};';const all=document.cookie.split('; ');for(const c of all){{if(c.startsWith(n))return c.slice(n.length);}}return null}})()",
+                    js_escape(k)
+                ),
+                None => "document.cookie".to_string(),
+            },
+            (store, "keys") => {
+                let store = if store == "session" { "sessionStorage" } else { "localStorage" };
+                format!("JSON.stringify(Object.keys({store}))")
+            }
+            (store, "set") => {
+                let store = if store == "session" { "sessionStorage" } else { "localStorage" };
+                match (&key, &value) {
+                    (Some(k), Some(v)) => format!(
+                        "(()=>{{{}.setItem(\"{}\",\"{}\");return 'ok'}})()",
+                        store,
+                        js_escape(k),
+                        js_escape(v)
+                    ),
+                    _ => {
+                        return Err(rmcp::model::ErrorData::invalid_params(
+                            "set needs key + value",
+                            None,
+                        ))
+                    }
+                }
+            }
+            (store, "clear") => {
+                let store = if store == "session" { "sessionStorage" } else { "localStorage" };
+                format!("(()=>{{{store}.clear();return 'ok'}})()")
+            }
+            (store, _) => {
+                let store = if store == "session" { "sessionStorage" } else { "localStorage" };
+                match &key {
+                    Some(k) => format!("{store}.getItem(\"{}\")", js_escape(k)),
+                    None => {
+                        return Err(rmcp::model::ErrorData::invalid_params(
+                            "get needs key",
+                            None,
+                        ))
+                    }
+                }
+            }
+        };
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_storage",
+            Some(&page_id),
+            serde_json::json!({ "op": op, "area": area }),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "IN-PAGE HTTP: fetch a URL from INSIDE the page context — runs with the page's cookies, origin and fingerprint (credentials:include). Same-origin API pivots always work; cross-origin still obeys CORS (as any browser would). Use it to call the site's own APIs after login without copying tokens. Returns {status, ok, url, headers, body_len, body} (body capped at 2MB)."
+    )]
+    async fn page_http(
+        &self,
+        Parameters(HttpParams {
+            session_id,
+            page_id,
+            url,
+            method,
+            headers,
+            body,
+        }): Parameters<HttpParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let method = method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
+        let headers_json =
+            serde_json::to_string(&headers.unwrap_or_default()).unwrap_or_else(|_| "{}".into());
+        let body_part = match (&body, method.as_str()) {
+            (Some(b), m) if m != "GET" && m != "HEAD" => {
+                format!(",body:{}", serde_json::to_string(b).unwrap_or_default())
+            }
+            _ => String::new(),
+        };
+        let url_json = serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".into());
+        let expr = format!(
+            "(async()=>{{const r=await fetch({url_json},{{method:'{}',credentials:'include',headers:{headers_json}{body_part}}});const t=await r.text();const hd={{}};r.headers.forEach((v,k)=>hd[k]=v);return JSON.stringify({{status:r.status,ok:r.ok,url:r.url,headers:hd,body_len:t.length,body:t.slice(0,2000000)}});}})().catch(e=>JSON.stringify({{error:String(e)}}))",
+            js_escape(&method),
+        );
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_http",
+            Some(&page_id),
+            serde_json::json!({ "method": method, "url": url }),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "EXPORT HAR: serialize every captured HTTP exchange of this page into a HAR 1.2 log (request url+method, status, response body via Network capture). Start page_network_start first for bodies; without it entries still carry url/method/status. Returns the HAR JSON."
+    )]
+    async fn export_har(
+        &self,
+        Parameters(HarParams {
+            session_id,
+            page_id,
+        }): Parameters<HarParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let entries = page
+            .net_read(false)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let mut har_entries = Vec::new();
+        for e in &entries {
+            let url = e.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let method = e.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+            let status = e.get("status").and_then(|v| v.as_i64()).unwrap_or(0);
+            let rid = e.get("requestId").and_then(|v| v.as_str());
+            let mut body_text: Option<String> = None;
+            let mut mime = "application/octet-stream".to_string();
+            if let Some(id) = rid {
+                if let Ok(b) = page.net_get_body(id).await {
+                    mime = "text/plain; charset=utf-8".to_string();
+                    body_text = Some(b);
+                }
+            }
+            let ts = e.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+            let started = chrono::DateTime::from_timestamp_millis(ts)
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_default();
+            har_entries.push(serde_json::json!({
+                "startedDateTime": started,
+                "time": 0,
+                "request": {
+                    "method": method,
+                    "url": url,
+                    "httpVersion": "HTTP/1.1",
+                    "headers": [],
+                    "queryString": [],
+                    "cookies": [],
+                    "headersSize": -1,
+                    "bodySize": -1,
+                },
+                "response": {
+                    "status": status,
+                    "statusText": "",
+                    "httpVersion": "HTTP/1.1",
+                    "headers": [],
+                    "cookies": [],
+                    "content": {
+                        "size": body_text.as_deref().map(|b| b.len()).unwrap_or(0),
+                        "mimeType": mime,
+                        "text": body_text,
+                    },
+                    "redirectURL": "",
+                    "headersSize": -1,
+                    "bodySize": body_text.as_deref().map(|b| b.len()).unwrap_or(-1),
+                },
+                "cache": {},
+                "timings": { "send": 0, "wait": 0, "receive": 0 },
+            }));
+        }
+        let _ = self.recorder.record(
+            &session_id,
+            "export_har",
+            Some(&page_id),
+            serde_json::json!({ "entries": har_entries.len() }),
+        );
+        Ok(text_result(
+            serde_json::to_string(&serde_json::json!({
+                "log": {
+                    "version": "1.2",
+                    "creator": { "name": "ghostcloak", "version": "0.8" },
+                    "entries": har_entries,
+                }
+            }))
+            .unwrap_or_default(),
         ))
     }
 

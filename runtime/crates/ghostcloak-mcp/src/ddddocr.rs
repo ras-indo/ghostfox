@@ -126,11 +126,19 @@ pub async fn classify_png(png: &[u8]) -> Result<String> {
     let (shape, flat) = outputs[0]
         .try_extract_tensor::<f32>()
         .context("extracting output tensor")?;
-    // ONNX output is [T, 1, C] (sequence-major)
-    let (t, c) = (
-        shape.get(0).copied().unwrap_or(0) as usize,
-        shape.get(2).copied().unwrap_or(0) as usize,
-    );
+    let dims: Vec<usize> = shape.iter().map(|d| *d as usize).collect();
+    // Output may be [1, T, C] (batch-major) or [T, 1, C] (sequence-major);
+    // reading batch dim as T decodes a single timestep and yields "".
+    let (t, c) = if dims.len() == 3 && dims[0] == 1 && dims[1] != 1 {
+        (dims[1], dims[2])
+    } else if dims.len() == 3 {
+        (dims[0], dims[2])
+    } else {
+        (
+            dims.first().copied().unwrap_or(0),
+            dims.last().copied().unwrap_or(0),
+        )
+    };
 
     // CTC greedy decode
     let mut prev: Option<usize> = None;
@@ -155,6 +163,14 @@ pub async fn classify_png(png: &[u8]) -> Result<String> {
             }
         }
         prev = Some(best);
+    }
+    if out.is_empty() {
+        return Err(anyhow!(
+            "empty CTC decode (dims {:?}, t={}, c={}) — model missed the text",
+            dims,
+            t,
+            c
+        ));
     }
     Ok(out)
 }

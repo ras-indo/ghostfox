@@ -16,6 +16,7 @@ pub(crate) const WALK_JS: &str = r#"(
     const out = [];
     const INTERACTIVE_SELECTOR = [
       'a[href]', 'button', 'input', 'select', 'textarea', 'summary',
+      'img',
       '[role]', '[contenteditable="true"]', '[onclick]', '[tabindex]',
       '[draggable="true"]',
     ].join(',');

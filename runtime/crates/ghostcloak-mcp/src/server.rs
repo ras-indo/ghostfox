@@ -397,6 +397,77 @@ struct IdentityAuditParams {
     identity_toml: String,
 }
 
+// ===== SEARCH/QUERY/DROPDOWN/SCROLL-TEXT (added 2026-09-30, from
+//      browser-use search_page/find_elements/dropdown_options/scroll_to_text) =====
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchParams {
+    session_id: String,
+    page_id: String,
+    /// Text (or regex) to find inside the rendered DOM.
+    pattern: String,
+    /// Treat pattern as a regular expression (default false = literal).
+    #[serde(default)]
+    regex: Option<bool>,
+    /// Case-sensitive match (default false = insensitive).
+    #[serde(default)]
+    case_sensitive: Option<bool>,
+    /// Restrict the search to elements under this CSS selector.
+    #[serde(default)]
+    css_scope: Option<String>,
+    /// Characters of surrounding context per hit (default 150).
+    #[serde(default)]
+    context_chars: Option<usize>,
+    /// Max hits returned (default 25).
+    #[serde(default)]
+    max_results: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct QueryParams {
+    session_id: String,
+    page_id: String,
+    /// CSS selector (querySelectorAll syntax).
+    selector: String,
+    /// Extra attributes to collect per element (e.g. ["href", "src"]).
+    #[serde(default)]
+    attributes: Option<Vec<String>>,
+    /// Max elements returned (default 50).
+    #[serde(default)]
+    max_results: Option<usize>,
+    /// Include trimmed inner text per element (default true).
+    #[serde(default)]
+    include_text: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DropdownParams {
+    session_id: String,
+    page_id: String,
+    /// CSS selector of the <select> or the ARIA menu container.
+    selector: String,
+    /// "list" (default) = enumerate options, "select" = pick one.
+    #[serde(default)]
+    action: Option<String>,
+    /// Option label to match exactly (text.trim() equality).
+    #[serde(default)]
+    text: Option<String>,
+    /// Option value to match exactly (fallback when text has no match).
+    #[serde(default)]
+    value: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ScrollTextParams {
+    session_id: String,
+    page_id: String,
+    /// Text that must become visible in the viewport.
+    text: String,
+    /// "down" (default) = first occurrence from top, "up" = last occurrence.
+    #[serde(default)]
+    direction: Option<String>,
+}
+
 // ===== BATCH TOOLS (added 2026-09-29: extraction/scraping/debug layer) =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -794,6 +865,146 @@ const MARKDOWN_JS: &str = r#"(()=>{
   let md = (document.title ? '# ' + document.title + '\n' : '') + conv(root);
   md = md.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   return { markdown: md.slice(0, 300000), chars: md.length };
+})()"#;
+
+const SEARCH_JS: &str = r#"(()=>{
+  const pat = "@@PAT@@";
+  const isRe = @@ISRE@@, cs = @@CS@@, scope = "@@SCOPE@@", ctxN = @@CTX@@, max = @@MAX@@;
+  let re;
+  try {
+    const src = isRe ? pat : pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    re = new RegExp(src, cs ? "g" : "gi");
+  } catch(e) { return { error: "invalid regex: " + e.message }; }
+  let roots = [document.body];
+  if (scope) {
+    try { roots = Array.from(document.querySelectorAll(scope)); }
+    catch(e) { return { error: "invalid css_scope: " + e.message }; }
+    if (!roots.length) return { found: 0, items: [], note: "css_scope matched 0 elements" };
+  }
+  const items = [];
+  let found = 0;
+  outer:
+  for (const root of roots) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      const t = n.nodeValue || "";
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(t))) {
+        found++;
+        if (items.length >= max) break outer;
+        const i = m.index;
+        const el = n.parentElement;
+        const item = {
+          match: m[0],
+          context: t.slice(Math.max(0, i - Math.floor(ctxN/2)), i + m[0].length + Math.floor(ctxN/2)).replace(/\s+/g, " ").trim(),
+          tag: el ? el.tagName.toLowerCase() : "",
+          offset: i
+        };
+        if (el && el.id) item.id = el.id;
+        items.push(item);
+        if (!m[0].length) re.lastIndex++;
+      }
+    }
+  }
+  return { found: found, items: items, truncated: found > items.length };
+})()"#;
+
+const QUERY_JS: &str = r#"(()=>{
+  const sel = "@@SEL@@", max = @@MAX@@, withText = @@TEXT@@, attrs = @@ATTRS@@;
+  let nodes;
+  try { nodes = document.querySelectorAll(sel); }
+  catch(e) { return { error: "invalid selector: " + e.message }; }
+  const total = nodes.length;
+  const items = [];
+  for (let i = 0; i < Math.min(total, max); i++) {
+    const n = nodes[i];
+    const it = { index: i, tag: n.tagName.toLowerCase() };
+    if (n.id) it.id = n.id;
+    if (withText) {
+      const t = (n.innerText || n.textContent || "").trim().slice(0, 100);
+      if (t) it.text = t;
+    }
+    if (attrs) {
+      const o = {};
+      for (const a of attrs) {
+        const v = n.getAttribute(a);
+        if (v !== null) o[a] = v.slice(0, 300);
+      }
+      it.attrs = o;
+    }
+    items.push(it);
+  }
+  return { total: total, returned: items.length, items: items };
+})()"#;
+
+const DROPDOWN_JS: &str = r#"(()=>{
+  const sel = "@@SEL@@", action = "@@ACT@@", wantText = @@TXT@@, wantValue = @@VAL@@;
+  let el;
+  try { el = document.querySelector(sel); }
+  catch(e) { return { error: "invalid selector: " + e.message }; }
+  if (!el) return { error: "no element matches " + sel };
+  if (action === "list") {
+    if (el.tagName === "SELECT") {
+      const opts = Array.from(el.options).map((o, i) => ({
+        index: i, text: o.text.trim(), value: o.value,
+        selected: o.selected, disabled: o.disabled
+      }));
+      return { kind: "select", count: opts.length, multiple: el.multiple,
+               value: el.value, options: opts.slice(0, 200) };
+    }
+    const opts = Array.from(el.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"]'));
+    if (!opts.length) return { error: "element is neither a <select> nor an ARIA menu with role=option children" };
+    return { kind: "aria", count: opts.length,
+             options: opts.slice(0, 200).map((o, i) => ({
+               index: i, text: (o.innerText || "").trim().slice(0, 120),
+               selected: o.getAttribute("aria-selected") === "true"
+             })) };
+  }
+  if (action !== "select") return { error: "action must be list|select, got " + action };
+  if (el.tagName === "SELECT") {
+    const opts = Array.from(el.options);
+    let idx = -1;
+    if (wantText !== null) idx = opts.findIndex(o => o.text.trim() === wantText);
+    if (idx < 0 && wantValue !== null) idx = opts.findIndex(o => o.value === wantValue);
+    if (idx < 0) {
+      return { error: "no option matches " + (wantText !== null ? "text " + JSON.stringify(wantText) : "value " + JSON.stringify(wantValue)),
+               available: opts.slice(0, 50).map(o => o.text.trim()) };
+    }
+    const o = opts[idx];
+    if (o.disabled) return { error: "matched option is disabled" };
+    el.selectedIndex = idx;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return { ok: true, kind: "select", text: o.text.trim(), value: o.value };
+  }
+  const opts = Array.from(el.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"]'));
+  const m = opts.find(o => (o.innerText || "").trim() === wantText)
+         || (wantValue !== null ? opts.find(o => (o.innerText || "").trim() === wantValue) : undefined);
+  if (!m) return { error: "no ARIA option matches the requested text/value" };
+  m.click();
+  return { ok: true, kind: "aria", text: (m.innerText || "").trim() };
+})()"#;
+
+const SCROLL_TEXT_JS: &str = r#"(()=>{
+  const target = "@@TXT@@", dir = "@@DIR@@";
+  const hits = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = walker.nextNode())) {
+    const v = n.nodeValue || "";
+    if (v.includes(target) && n.parentElement) hits.push(n.parentElement);
+  }
+  if (!hits.length) return { found: false, error: "text not present in rendered DOM" };
+  const el = dir === "up" ? hits[hits.length - 1] : hits[0];
+  el.scrollIntoView({ block: "center", behavior: "instant" });
+  const r = el.getBoundingClientRect();
+  return { found: true, occurrences: hits.length, tag: el.tagName.toLowerCase(),
+           inViewport: r.top >= -2 && r.bottom <= window.innerHeight + 2,
+           rect: { x: Math.round(r.left), y: Math.round(r.top),
+                   w: Math.round(r.width), h: Math.round(r.height) },
+           scrollY: Math.round(window.scrollY) };
 })()"#;
 
 const TOKENS_JS: &str = r#"(()=>{
@@ -2959,6 +3170,191 @@ impl GhostcloakServer {
         Ok(text_result(
             serde_json::to_string_pretty(&res).unwrap_or_default(),
         ))
+    }
+
+    #[tool(
+        description = "IN-PAGE GREP (zero LLM cost, instant): search the rendered DOM for text \
+        or a regex and return matches with surrounding context. Use this to VERIFY whether a \
+        string exists ('is the API key echoed?'), to quote evidence with context, or to \
+        pre-filter before page_extract — much cheaper and deterministic vs page_eval or LLM \
+        extraction. Options: regex=true for patterns, case_sensitive=true, css_scope to \
+        restrict to a subtree, context_chars (default 150) of surrounding text, max_results \
+        (default 25). Returns {found, truncated, items:[{match, context, tag, id?, offset}]}."
+    )]
+    async fn page_search(
+        &self,
+        Parameters(SearchParams {
+            session_id,
+            page_id,
+            pattern,
+            regex,
+            case_sensitive,
+            css_scope,
+            context_chars,
+            max_results,
+        }): Parameters<SearchParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let expr = SEARCH_JS
+            .replace("@@PAT@@", &js_escape(&pattern))
+            .replace("@@ISRE@@", if regex.unwrap_or(false) { "true" } else { "false" })
+            .replace(
+                "@@CS@@",
+                if case_sensitive.unwrap_or(false) { "true" } else { "false" },
+            )
+            .replace("@@SCOPE@@", &js_escape(&css_scope.clone().unwrap_or_default()))
+            .replace("@@CTX@@", &context_chars.unwrap_or(150).to_string())
+            .replace("@@MAX@@", &max_results.unwrap_or(25).to_string());
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_search",
+            Some(&page_id),
+            serde_json::json!({ "pattern": pattern }),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "DOM STRUCTURE ENUMERATION (zero LLM cost, instant): run \
+        querySelectorAll(selector) and list what matched — tag, id, trimmed text, plus any \
+        attributes you ask for (href, src, class, ...). Use BEFORE crafting links list, \
+        counting elements ('how many rows?'), or pulling every endpoint from [href]/[src] — \
+        deterministic and token-cheap vs a full snapshot. Returns {total, returned, \
+        items:[{index, tag, id?, text?, attrs?}]}. Errors name the bad selector."
+    )]
+    async fn page_query(
+        &self,
+        Parameters(QueryParams {
+            session_id,
+            page_id,
+            selector,
+            attributes,
+            max_results,
+            include_text,
+        }): Parameters<QueryParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let attrs_json = match &attributes {
+            Some(a) => serde_json::to_string(a).unwrap_or_else(|_| "null".into()),
+            None => "null".to_string(),
+        };
+        let expr = QUERY_JS
+            .replace("@@SEL@@", &js_escape(&selector))
+            .replace("@@MAX@@", &max_results.unwrap_or(50).to_string())
+            .replace(
+                "@@TEXT@@",
+                if include_text.unwrap_or(true) { "true" } else { "false" },
+            )
+            .replace("@@ATTRS@@", &attrs_json);
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_query",
+            Some(&page_id),
+            serde_json::json!({ "selector": selector }),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "DROPDOWN INSPECT & PICK: action=list enumerates every option of a native \
+        <select> (text/value/selected/disabled) or an ARIA menu (role=option/menuitem) so you \
+        never guess labels; action=select picks an option by EXACT text (fallback: exact \
+        value), fires input+change events so React/Vue listeners react, and refuses disabled \
+        options. On a miss it returns the available labels — fix your text and retry. Typical \
+        flow: list → pick → verify via page_eval. Returns {kind: select|aria, ...}."
+    )]
+    async fn page_dropdown(
+        &self,
+        Parameters(DropdownParams {
+            session_id,
+            page_id,
+            selector,
+            action,
+            text,
+            value,
+        }): Parameters<DropdownParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let act = action.unwrap_or_else(|| "list".to_string());
+        if act != "list" && act != "select" {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "action must be list or select",
+                None,
+            ));
+        }
+        let expr = DROPDOWN_JS
+            .replace("@@SEL@@", &js_escape(&selector))
+            .replace("@@ACT@@", &js_escape(&act))
+            .replace("@@TXT@@", &serde_json::to_string(&text).unwrap_or_else(|_| "null".into()))
+            .replace("@@VAL@@", &serde_json::to_string(&value).unwrap_or_else(|_| "null".into()));
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_dropdown",
+            Some(&page_id),
+            serde_json::json!({ "selector": selector, "action": act }),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "SCROLL UNTIL TEXT IS VISIBLE: finds the element containing the given text \
+        and scrolls it into the center of the viewport, then reports its rect + inViewport \
+        verdict. Use for verification ('is Terms of Service in the footer?') — kills the \
+        blind scroll-and-screenshot loop. direction=down (default) targets the first \
+        occurrence from the top, direction=up the last one. Returns {found, occurrences, tag, \
+        inViewport, rect, scrollY}; {found:false} when the text is not in the DOM at all."
+    )]
+    async fn page_scroll_to_text(
+        &self,
+        Parameters(ScrollTextParams {
+            session_id,
+            page_id,
+            text,
+            direction,
+        }): Parameters<ScrollTextParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let dir = direction.unwrap_or_else(|| "down".to_string());
+        if dir != "down" && dir != "up" {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "direction must be down or up",
+                None,
+            ));
+        }
+        let expr = SCROLL_TEXT_JS
+            .replace("@@TXT@@", &js_escape(&text))
+            .replace("@@DIR@@", &js_escape(&dir));
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_scroll_to_text",
+            Some(&page_id),
+            serde_json::json!({ "text": text, "direction": dir }),
+        );
+        Ok(r)
     }
 
     #[tool(

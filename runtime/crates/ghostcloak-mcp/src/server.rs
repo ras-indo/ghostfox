@@ -2209,7 +2209,7 @@ impl GhostcloakServer {
                     },
                     "redirectURL": "",
                     "headersSize": -1,
-                    "bodySize": body_text.as_deref().map(|b| b.len()).unwrap_or(-1),
+                    "bodySize": body_text.as_deref().map(|b| b.len() as i64).unwrap_or(-1),
                 },
                 "cache": {},
                 "timings": { "send": 0, "wait": 0, "receive": 0 },

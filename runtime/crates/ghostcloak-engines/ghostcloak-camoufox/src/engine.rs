@@ -1822,7 +1822,14 @@ impl PageHandle for CamoufoxPage {
             // vanished. Route punctuation through `Page.insertText`
             // (IME-like commit at the caret); the keydown/keyup above
             // still fire for keystroke-dynamics realism.
-            let needs_text_insert = !k.chars().all(|c| c.is_ascii_alphanumeric());
+            //
+            // Space/Enter/Tab MUST stay out of this branch: plain
+            // keydown already inserts them, and inserting again doubled
+            // every space ("aa  bb").
+            let needs_text_insert = k != " "
+                && k != "\n"
+                && k != "\t"
+                && !k.chars().all(|c| c.is_ascii_alphanumeric());
             for ty in ["keydown", "keyup"] {
                 let _ = self
                     .conn

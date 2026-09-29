@@ -11,7 +11,7 @@ use rmcp::handler::server::tool::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use ghostcloak_core::engine::EngineKind;
 use ghostcloak_core::session::Session;
@@ -469,7 +469,7 @@ struct ScrollTextParams {
 }
 
 /// One field entry for page_fill_form: selector + value (text/select) or checked (checkbox/radio).
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct FillField {
     /// CSS selector for the form control.
     selector: String,

@@ -1717,6 +1717,36 @@ impl GhostcloakServer {
                 }
             }
         }
+        if out.as_str() == Some("NO") {
+            // Risk-based auto-pass: the token can be issued without any
+            // challenge popup — check it before declaring failure.
+            let tok = page
+                .evaluate(token_js)
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            let response_len = tok.as_i64().unwrap_or(0);
+            if response_len > 0 {
+                let _ = self.recorder.record(
+                    &session_id,
+                    "page_hcaptcha",
+                    Some(&page_id),
+                    serde_json::json!({ "phase": "auto_pass", "response_len": response_len }),
+                );
+                return Ok(text_result(
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "success": true,
+                        "rounds": 1,
+                        "response_len": response_len,
+                        "auto_pass": true,
+                    }))
+                    .unwrap_or_default(),
+                ));
+            }
+            return Err(rmcp::model::ErrorData::internal_error(
+                "hCaptcha challenge iframe never appeared",
+                None,
+            ));
+        }
         let chall: serde_json::Value =
             serde_json::from_str(out.as_str().unwrap_or("")).map_err(|_| {
                 rmcp::model::ErrorData::internal_error(

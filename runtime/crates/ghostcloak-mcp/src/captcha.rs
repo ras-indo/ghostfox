@@ -1,139 +1,26 @@
-//! Optional CAPTCHA solving hook.
+//! LOCAL CAPTCHA solving — no third-party services, no API keys.
 //!
-//! Ghostfox's philosophy is stealth-first (don't get challenged), but when a
-//! flow hits a gate anyway, an external solver can be wired in. Configure:
-//!
-//!   GHOSTFOX_CAPTCHA_PROVIDER=2captcha
-//!   GHOSTFOX_CAPTCHA_KEY=<api key>
-//!
-//! Nothing is enabled without both variables; no key material is recorded
-//! in session evidence.
+//! Image/text captchas are classified on-device with the ddddocr ONNX
+//! model (same engine as page_captcha_ocr). Standalone Turnstile /
+//! reCAPTCHA / hCaptcha tokens are issued by the vendor server and
+//! cannot be produced on-device; solve those interactively on the live
+//! page with the page tools (page_hcaptcha = agent-driven image grids).
 
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(150);
+use base64::Engine as _;
 
-fn provider() -> Option<(&'static str, String)> {
-    let key = std::env::var("GHOSTFOX_CAPTCHA_KEY").ok()?;
-    let provider = std::env::var("GHOSTFOX_CAPTCHA_PROVIDER").unwrap_or_else(|_| "2captcha".into());
-    match provider.as_str() {
-        "2captcha" => Some(("2captcha", key)),
-        _ => None,
-    }
-}
-
-async fn http_get_json(url: &str) -> Result<serde_json::Value, String> {
-    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
-    resp.json().await.map_err(|e| e.to_string())
-}
-
-/// Solve a Cloudflare Turnstile (or compatible) challenge for `sitekey` on
-/// `pageurl`; returns the `cf-turnstile-response` token.
-pub async fn solve_turnstile(sitekey: &str, pageurl: &str) -> Result<String, String> {
-    let (_, key) = provider().ok_or(
-        "captcha solving not configured (set GHOSTFOX_CAPTCHA_PROVIDER + GHOSTFOX_CAPTCHA_KEY)",
-    )?;
-    let client = reqwest::Client::new();
-
-    // Submit.
-    let submit: serde_json::Value = client
-        .get("https://2captcha.com/in.php")
-        .query(&[
-            ("key", key.as_str()),
-            ("method", "turnstile"),
-            ("sitekey", sitekey),
-            ("pageurl", pageurl),
-            ("json", "1"),
-        ])
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-    let request_id = submit
-        .get("request")
-        .and_then(|r| r.as_str())
-        .ok_or(format!("solver rejected the task: {submit}"))?
-        .to_string();
-
-    // Poll.
-    let deadline = std::time::Instant::now() + MAX_WAIT;
-    while std::time::Instant::now() < deadline {
-        tokio::time::sleep(POLL_INTERVAL).await;
-        let res = http_get_json(&format!(
-            "https://2captcha.com/res.php?key={key}&action=get&id={request_id}&json=1"
-        ))
-        .await?;
-        match res.get("status").and_then(|s| s.as_i64()) {
-            Some(1) => {
-                return Ok(res
-                    .get("request")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or_default()
-                    .to_string())
-            }
-            Some(0) => {
-                // CAPCHA_NOT_READY → keep polling; anything else is fatal.
-                let msg = res.get("request").and_then(|r| r.as_str()).unwrap_or("");
-                if msg != "CAPCHA_NOT_READY" {
-                    return Err(format!("solver error: {msg}"));
-                }
-            }
-            _ => return Err(format!("unexpected solver response: {res}")),
-        }
-    }
-    Err("solver timed out".into())
-}
-
-/// Solve an image captcha (base64 PNG) and return the text.
+/// Solve an image/text captcha from base64 PNG with the local ddddocr
+/// model. Accepts raw base64 or a `data:image/png;base64,...` URL.
 pub async fn solve_image(image_b64: &str) -> Result<String, String> {
-    let (_, key) = provider().ok_or(
-        "captcha solving not configured (set GHOSTFOX_CAPTCHA_PROVIDER + GHOSTFOX_CAPTCHA_KEY)",
-    )?;
-    let client = reqwest::Client::new();
-    let submit: serde_json::Value = client
-        .post("https://2captcha.com/in.php")
-        .form(&[
-            ("key", key.as_str()),
-            ("method", "base64"),
-            ("body", image_b64),
-            ("json", "1"),
-        ])
-        .send()
+    let raw = image_b64.trim();
+    let raw = raw.rsplit(',').next().unwrap_or(raw);
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(raw)
+        .map_err(|e| format!("invalid base64 image: {e}"))?;
+    crate::ddddocr::classify_png(&png)
         .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-    let request_id = submit
-        .get("request")
-        .and_then(|r| r.as_str())
-        .ok_or(format!("solver rejected the task: {submit}"))?
-        .to_string();
-
-    let deadline = std::time::Instant::now() + MAX_WAIT;
-    while std::time::Instant::now() < deadline {
-        tokio::time::sleep(POLL_INTERVAL).await;
-        let res = http_get_json(&format!(
-            "https://2captcha.com/res.php?key={key}&action=get&id={request_id}&json=1"
-        ))
-        .await?;
-        match res.get("status").and_then(|s| s.as_i64()) {
-            Some(1) => {
-                return Ok(res
-                    .get("request")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or_default()
-                    .to_string())
-            }
-            Some(0) => {
-                let msg = res.get("request").and_then(|r| r.as_str()).unwrap_or("");
-                if msg != "CAPCHA_NOT_READY" {
-                    return Err(format!("solver error: {msg}"));
-                }
-            }
-            _ => return Err(format!("unexpected solver response: {res}")),
-        }
-    }
-    Err("solver timed out".into())
+        .map_err(|e| format!("local ddddocr classify failed: {e}"))
 }
+
+/// Message for vendor-issued token challenges (Turnstile/reCAPTCHA):
+/// there is no local way to mint these tokens.
+pub const NO_STANDALONE_TOKEN: &str = "token captchas (Turnstile/reCAPTCHA) are issued by the vendor server — no local solver can mint them and no external service is used. Open the challenge on the live page and solve it interactively: checkbox/widget via page_click, image grids via page_hcaptcha (agent-driven, local vision). For plain image captchas pass image_base64 (solved locally with ddddocr).";

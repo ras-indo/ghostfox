@@ -180,17 +180,34 @@ struct CaptchaOcrParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct Tile {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DragXY {
+    from: Tile,
+    to: Tile,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct HcaptchaParams {
     session_id: String,
     page_id: String,
     /// Optional ref of the hCaptcha anchor iframe / checkbox. If omitted
     /// the tool auto-locates the anchor iframe by src pattern.
     checkbox_ref: Option<String>,
-    /// Cloudflare API key for the host vision model (defaults to CLOUDFLARE_API_KEY env).
-    cf_api_key: Option<String>,
-    /// Cloudflare account id (defaults to CLOUDFLARE_ACCOUNT_ID env).
-    cf_account_id: Option<String>,
-    /// Max challenge rounds (hCaptcha chains 2-4). Default 4.
+    /// APPLY phase: viewport-absolute pixel coordinates to click this
+    /// round, as read from the need_answer screenshot. Omit for the
+    /// PREPARE phase (opens the challenge and returns a screenshot).
+    tiles: Option<Vec<Tile>>,
+    /// Optional drag puzzle: from/to in viewport pixels (same screenshot
+    /// coordinate space as tiles).
+    drag: Option<DragXY>,
+    /// Optional verify/submit button coordinate (viewport pixels).
+    verify: Option<Tile>,
+    /// Max challenge rounds (hCaptcha chains 2-4). Default 6.
     max_rounds: Option<u32>,
 }
 
@@ -1574,8 +1591,36 @@ impl GhostcloakServer {
         Ok(text_result(text))
     }
 
+    /// One real mouse click at viewport-absolute (x, y) via a dummy
+    /// fixed-position anchor + drag_ref, same humanized path the original
+    /// solver used for its GLM-derived clicks.
+    async fn hc_click_xy(
+        page: &Arc<dyn ghostcloak_core::engine::PageHandle>,
+        x: f64,
+        y: f64,
+        name: &str,
+    ) -> Result<(), rmcp::model::ErrorData> {
+        let mk = format!(
+            r#"(function() {{
+  window.__gfxRefs = window.__gfxRefs || new Map();
+  var d = document.createElement('div');
+  d.style.cssText = 'position:fixed;left:{x}px;top:{y}px;width:2px;height:2px;z-index:99999;pointer-events:none;';
+  document.body.appendChild(d);
+  window.__gfxRefs.set('{name}', d);
+  return 'OK';
+}})()"#,
+            x = x,
+            y = y,
+            name = name
+        );
+        let _ = page.evaluate(&mk).await;
+        page.drag_ref(name, "", 0.0, 0.0)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))
+    }
+
     #[tool(
-        description = "HCAPTCHA SOLVER: solve hCaptcha image challenges from the live page with the host vision model (Cloudflare Workers AI GLM). Handles ALL challenge variants — tile grids, pattern-break icon fields, any image-pick — by asking the model for the exact pixel coordinates of every element to click, then clicking with the humanized mouse. Multi-round: loops until the page's h-captcha-response field receives a token (up to max_rounds, default 4). Credentials come from CLOUDFLARE_API_KEY / CLOUDFLARE_ACCOUNT_ID env or the params. Returns JSON {success, rounds, response_len}."
+        description = "HCAPTCHA SOLVER (agent-driven, 100% local — no API keys, no third-party vision): two-phase flow. PREPARE (no tiles param): opens the challenge (clicking the anchor if needed), then returns {phase:'need_answer', round, screenshot, challenge:{x,y,w,h,vw,png_width}} — look at the screenshot, pick the viewport pixel coordinates of the tiles to click, then call AGAIN WITH tiles=[{x,y}...] (plus optional verify={x,y} submit button, drag={from:{x,y},to:{x,y}} for drag puzzles). After applying, the tool re-checks the token: returns success=true, or the next need_answer screenshot (hCaptcha chains 2-4 rounds) until max_rounds (default 6). The agent does the seeing; the tool does the clicking."
     )]
     async fn page_hcaptcha(
         &self,
@@ -1583,8 +1628,9 @@ impl GhostcloakServer {
             session_id,
             page_id,
             checkbox_ref,
-            cf_api_key,
-            cf_account_id,
+            tiles,
+            drag,
+            verify,
             max_rounds,
         }): Parameters<HcaptchaParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
@@ -1596,34 +1642,39 @@ impl GhostcloakServer {
             .page(&page_id)
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
-        let key = cf_api_key
-            .or_else(|| std::env::var("CLOUDFLARE_API_KEY").ok())
-            .ok_or_else(|| {
-                rmcp::model::ErrorData::invalid_params("no CLOUDFLARE_API_KEY (param or env)", None)
-            })?;
-        let account = cf_account_id
-            .or_else(|| std::env::var("CLOUDFLARE_ACCOUNT_ID").ok())
-            .ok_or_else(|| {
-                rmcp::model::ErrorData::invalid_params(
-                    "no CLOUDFLARE_ACCOUNT_ID (param or env)",
-                    None,
-                )
-            })?;
-        let glm = crate::hcaptcha::Glm::new(account, key);
         let max_rounds = max_rounds.unwrap_or(6) as usize;
+        let token_js = r#"(function() {
+  var r = document.querySelector('[name*=h-captcha-response], textarea[name*=h-captcha-response]');
+  return r ? (r.value || '').length : 0;
+})()"#;
+        let chall_js = r#"(function() {
+  var f = null;
+  document.querySelectorAll('iframe').forEach(function(i) {
+    var b = i.getBoundingClientRect();
+    if (b.width > 400 && b.y > -100 && !f) f = i;
+  });
+  if (!f) return 'NO';
+  var b = f.getBoundingClientRect();
+  return JSON.stringify({x: b.x, y: b.y, w: b.width, h: b.height, vw: window.innerWidth});
+})()"#;
 
-        // 1. Locate + click the anchor checkbox.
-        let anchor_js = match &checkbox_ref {
-            Some(r) => format!(
-                r#"(function() {{
+        // 1. Locate the challenge iframe; if absent, click the anchor first.
+        let mut out = page
+            .evaluate(chall_js)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        if out.as_str() == Some("NO") {
+            let anchor_js = match &checkbox_ref {
+                Some(r) => format!(
+                    r#"(function() {{
   var el = (window.__gfxRefs || new Map()).get({r});
   if (!el || !el.isConnected) return JSON.stringify({{err: 'stale ref'}});
   var b = el.getBoundingClientRect();
   return JSON.stringify({{x: b.x + b.width/2, y: b.y + b.height/2}});
 }})()"#,
-                r = serde_json::to_string(r).unwrap_or_default()
-            ),
-            None => r#"(function() {
+                    r = serde_json::to_string(r).unwrap_or_default()
+                ),
+                None => r#"(function() {
   var f = null;
   document.querySelectorAll('iframe').forEach(function(i) {
     var src = (i.src || '');
@@ -1636,256 +1687,187 @@ impl GhostcloakServer {
   var b = f.getBoundingClientRect();
   return JSON.stringify({x: b.x + b.width/2, y: b.y + b.height/2});
 })()"#
-                .to_string(),
-        };
-        let out = page
-            .evaluate(&anchor_js)
-            .await
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-        let av: serde_json::Value = serde_json::from_str(out.as_str().unwrap_or("{}"))
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-        if let Some(err) = av
-            .get("err")
-            .and_then(|e| e.as_str())
-            .map(|e| e.to_string())
-        {
-            return Err(rmcp::model::ErrorData::internal_error(err, None));
-        }
-        let (ax, ay) = (
-            av.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            av.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
-        );
-        let mk_js = format!(
-            r#"(function() {{
-  window.__gfxRefs = window.__gfxRefs || new Map();
-  var d = document.createElement('div');
-  d.style.cssText = 'position:fixed;left:{ax}px;top:{ay}px;width:2px;height:2px;z-index:99999;pointer-events:none;';
-  document.body.appendChild(d);
-  window.__gfxRefs.set('hc_anchor', d);
-  return 'OK';
-}})()"#
-        );
-        let _ = page.evaluate(&mk_js).await;
-        page.drag_ref("hc_anchor", "", 0.0, 0.0)
-            .await
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-
-        // 2. Wait for the challenge iframe (large, visible).
-        let chall_js = r#"(function() {
-  var f = null;
-  document.querySelectorAll('iframe').forEach(function(i) {
-    var b = i.getBoundingClientRect();
-    if (b.width > 400 && b.y > -100 && !f) f = i;
-  });
-  if (!f) return 'NO';
-  var b = f.getBoundingClientRect();
-  return JSON.stringify({x: b.x, y: b.y, w: b.width, h: b.height, vw: window.innerWidth});
-})()"#;
-        let mut chall: Option<serde_json::Value> = None;
-        for _ in 0..14 {
-            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-            let out = page
-                .evaluate(chall_js)
+                    .to_string(),
+            };
+            let av_out = page
+                .evaluate(&anchor_js)
                 .await
                 .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-            if out.as_str() != Some("NO") {
-                chall = serde_json::from_str(out.as_str().unwrap_or("")).ok();
-                break;
+            let av: serde_json::Value = serde_json::from_str(av_out.as_str().unwrap_or("{}"))
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            if let Some(err) = av.get("err").and_then(|e| e.as_str()) {
+                return Err(rmcp::model::ErrorData::internal_error(err.to_string(), None));
+            }
+            let (ax, ay) = (
+                av.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                av.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            );
+            Self::hc_click_xy(&page, ax, ay, "hc_anchor").await?;
+            for _ in 0..14 {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                out = page
+                    .evaluate(chall_js)
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+                if out.as_str() != Some("NO") {
+                    break;
+                }
             }
         }
-        let chall = chall.ok_or_else(|| {
-            rmcp::model::ErrorData::internal_error("hCaptcha challenge iframe never appeared", None)
-        })?;
-        let (mut cx, mut cy, mut cw, mut ch, vw) = (
+        let chall: serde_json::Value = serde_json::from_str(out.as_str().unwrap_or("")).map_err(
+            |_| {
+                rmcp::model::ErrorData::internal_error(
+                    "hCaptcha challenge iframe never appeared",
+                    None,
+                )
+            },
+        )?;
+        let (cx, cy, cw, ch, vw) = (
             chall.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
             chall.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
             chall.get("w").and_then(|v| v.as_f64()).unwrap_or(0.0),
             chall.get("h").and_then(|v| v.as_f64()).unwrap_or(0.0),
             chall.get("vw").and_then(|v| v.as_f64()).unwrap_or(1.0),
         );
+        let round_now = async {
+            let out = page.evaluate("String(window.__hcRound||0)").await.unwrap_or_default();
+            out.as_str().unwrap_or("0").parse::<u32>().unwrap_or(0)
+        }
+        .await;
 
-        let token_js = r#"(function() {
-  var r = document.querySelector('[name*=h-captcha-response], textarea[name*=h-captcha-response]');
-  return r ? (r.value || '').length : 0;
-})()"#;
-
-        // 3. Solve rounds.
-        let mut rounds = 0usize;
-        let mut response_len = 0i64;
-        let mut debug_rounds: Vec<serde_json::Value> = Vec::new();
-        for round in 0..max_rounds {
-            rounds = round + 1;
-            // Re-query the challenge iframe each round (it can move/resize).
-            let out = page
-                .evaluate(chall_js)
-                .await
-                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-            if out.as_str() == Some("NO") {
-                break;
-            }
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(out.as_str().unwrap_or("")) {
-                cx = v.get("x").and_then(|x| x.as_f64()).unwrap_or(cx);
-                cy = v.get("y").and_then(|x| x.as_f64()).unwrap_or(cy);
-                cw = v.get("w").and_then(|x| x.as_f64()).unwrap_or(cw);
-                ch = v.get("h").and_then(|x| x.as_f64()).unwrap_or(ch);
-            }
+        // 2a. PREPARE: nothing to click yet — hand the screenshot to the agent.
+        if tiles.is_none() && drag.is_none() && verify.is_none() {
+            // Let lazy-loaded tiles settle so the screenshot shows content.
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             let png = page
                 .screenshot(false)
                 .await
                 .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-            let img = image::load_from_memory(&png)
+            let png_width = image::load_from_memory(&png)
+                .map(|i| i.width())
+                .unwrap_or(0);
+            let path = self
+                .recorder
+                .record_screenshot(&session_id, &page_id, &png)
                 .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-            let scale = img.width() as f64 / vw.max(1.0);
-            let (bx, by, bw, bh) = (
-                (cx * scale) as u32,
-                (cy * scale) as u32,
-                (cw * scale) as u32,
-                (ch * scale) as u32,
-            );
-            let cropped = image::imageops::crop_imm(
-                &img,
-                bx,
-                by,
-                bw.min(img.width().saturating_sub(bx)),
-                bh.min(img.height().saturating_sub(by)),
-            )
-            .to_image();
-            let mut buf = std::io::Cursor::new(Vec::new());
-            cropped
-                .write_to(&mut buf, image::ImageFormat::Png)
-                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-            // Render-wait: hCaptcha tiles lazy-load; solve only once content is visible.
-            let mut ready_png = buf.into_inner();
-            for _ in 0..6 {
-                if crate::hcaptcha::is_rendered(&ready_png) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                let png2 = page
-                    .screenshot(false)
-                    .await
-                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-                let img2 = image::load_from_memory(&png2)
-                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-                let scale2 = img2.width() as f64 / vw.max(1.0);
-                let (bx2, by2, bw2, bh2) = (
-                    (cx * scale2) as u32,
-                    (cy * scale2) as u32,
-                    (cw * scale2) as u32,
-                    (ch * scale2) as u32,
-                );
-                let c2 = image::imageops::crop_imm(
-                    &img2,
-                    bx2,
-                    by2,
-                    bw2.min(img2.width().saturating_sub(bx2)),
-                    bh2.min(img2.height().saturating_sub(by2)),
-                )
-                .to_image();
-                let mut b2 = std::io::Cursor::new(Vec::new());
-                c2.write_to(&mut b2, image::ImageFormat::Png)
-                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-                ready_png = b2.into_inner();
-            }
-            let (solved, layout, model_raw) = glm
-                .solve_challenge_dbg(&ready_png, cropped.width(), cropped.height())
+            let out = page
+                .evaluate("window.__hcRound = (window.__hcRound||0)+1; String(window.__hcRound)")
                 .await
                 .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-            debug_rounds.push(serde_json::json!({
-                "round": round + 1,
-                "iframe": { "x": cx, "y": cy, "w": cw, "h": ch },
-                "layout": layout,
-                "model": model_raw,
-                "clicks": solved.clicks,
-                "drag": solved.drag,
-                "verify": solved.verify,
-            }));
-            // DRAG challenge: press at source, human-drag to target.
-            if let Some((from, to)) = solved.drag {
-                let mk = format!(
-                    r#"(function() {{
-  window.__gfxRefs = window.__gfxRefs || new Map();
-  var d = document.createElement('div');
-  d.style.cssText = 'position:fixed;left:{fx}px;top:{fy}px;width:2px;height:2px;z-index:99999;pointer-events:none;';
-  document.body.appendChild(d);
-  window.__gfxRefs.set('hc_drag', d);
-  return 'OK';
-}})()"#,
-                    fx = cx + from.0,
-                    fy = cy + from.1
-                );
-                let _ = page.evaluate(&mk).await;
-                page.drag_ref("hc_drag", "", to.0 - from.0, to.1 - from.1)
-                    .await
-                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-                let out = page.evaluate(token_js).await.unwrap_or_default();
-                response_len = out.as_i64().unwrap_or(0);
-                if response_len > 0 {
-                    break;
-                }
-                continue;
+            let round = out.as_str().unwrap_or("1").parse::<u32>().unwrap_or(1);
+            if round as usize > max_rounds {
+                return Err(rmcp::model::ErrorData::internal_error(
+                    format!("max_rounds ({max_rounds}) exhausted — no token yet"),
+                    None,
+                ));
             }
-            let clicks = solved.clicks;
-            let verify = solved.verify;
+            let _ = self.recorder.record(
+                &session_id,
+                "page_hcaptcha",
+                Some(&page_id),
+                serde_json::json!({ "phase": "prepare", "round": round }),
+            );
+            return Ok(text_result(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "phase": "need_answer",
+                    "round": round,
+                    "screenshot": path.to_string_lossy(),
+                    "challenge": { "x": cx, "y": cy, "w": cw, "h": ch, "vw": vw, "png_width": png_width },
+                    "hint": "Look at the screenshot: pick viewport pixel coordinates of the tiles to click, then call again with tiles=[{x,y}...] (add verify={x,y} for the submit button; drag={from:{x,y},to:{x,y}} for drag puzzles). Each successful call returns either success=true or the next need_answer screenshot.",
+                }))
+                .unwrap_or_default(),
+            ));
+        }
 
-            for (i, (px, py)) in clicks.iter().enumerate() {
-                let mk = format!(
-                    r#"(function() {{
-  window.__gfxRefs = window.__gfxRefs || new Map();
-  var d = document.createElement('div');
-  d.style.cssText = 'position:fixed;left:{x}px;top:{y}px;width:2px;height:2px;z-index:99999;pointer-events:none;';
-  document.body.appendChild(d);
-  window.__gfxRefs.set('hc_t{i}', d);
-  return 'OK';
-}})()"#,
-                    x = cx + px,
-                    y = cy + py,
-                    i = i
-                );
-                let _ = page.evaluate(&mk).await;
-                page.drag_ref(&format!("hc_t{i}"), "", 0.0, 0.0)
-                    .await
-                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        // 2b. APPLY: click the agent's coordinates with the humanized mouse.
+        if let Some(list) = &tiles {
+            for (i, t) in list.iter().enumerate() {
+                Self::hc_click_xy(&page, t.x, t.y, &format!("hc_t{i}")).await?;
                 tokio::time::sleep(std::time::Duration::from_millis(400)).await;
             }
-            if let Some((vx, vy)) = verify {
-                let mk = format!(
-                    r#"(function() {{
+        }
+        if let Some(d) = &drag {
+            Self::hc_click_xy(&page, d.from.x, d.from.y, "hc_drag").await?;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let mk = format!(
+                r#"(function() {{
   window.__gfxRefs = window.__gfxRefs || new Map();
   var d = document.createElement('div');
   d.style.cssText = 'position:fixed;left:{x}px;top:{y}px;width:2px;height:2px;z-index:99999;pointer-events:none;';
   document.body.appendChild(d);
-  window.__gfxRefs.set('hc_v', d);
+  window.__gfxRefs.set('hc_dragmove', d);
   return 'OK';
 }})()"#,
-                    x = cx + vx,
-                    y = cy + vy
-                );
-                let _ = page.evaluate(&mk).await;
-                page.drag_ref("hc_v", "", 0.0, 0.0)
-                    .await
-                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
-            let out = page.evaluate(token_js).await.unwrap_or_default();
-            response_len = out.as_i64().unwrap_or(0);
-            if response_len > 0 {
-                break;
-            }
+                x = d.from.x,
+                y = d.from.y
+            );
+            let _ = page.evaluate(&mk).await;
+            page.drag_ref("hc_dragmove", "", d.to.x - d.from.x, d.to.y - d.from.y)
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         }
-        let _ = self.recorder.record(
-            &session_id,
-            "page_hcaptcha",
-            Some(&page_id),
-            serde_json::json!({ "rounds": rounds, "response_len": response_len }),
-        );
+        if let Some(v) = &verify {
+            Self::hc_click_xy(&page, v.x, v.y, "hc_verify").await?;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
+        let out = page
+            .evaluate(token_js)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let response_len = out.as_i64().unwrap_or(0);
+        let round = round_now.max(1);
+
+        if response_len > 0 {
+            let _ = self.recorder.record(
+                &session_id,
+                "page_hcaptcha",
+                Some(&page_id),
+                serde_json::json!({ "phase": "apply", "round": round, "response_len": response_len }),
+            );
+            return Ok(text_result(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "success": true,
+                    "rounds": round,
+                    "response_len": response_len,
+                }))
+                .unwrap_or_default(),
+            ));
+        }
+        if round as usize >= max_rounds {
+            return Ok(text_result(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "success": false,
+                    "phase": "max_rounds",
+                    "rounds": round,
+                }))
+                .unwrap_or_default(),
+            ));
+        }
+
+        // Not yet — hand over the next round's screenshot.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let png = page
+            .screenshot(false)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let png_width = image::load_from_memory(&png)
+            .map(|i| i.width())
+            .unwrap_or(0);
+        let path = self
+            .recorder
+            .record_screenshot(&session_id, &page_id, &png)
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let _ = page
+            .evaluate("window.__hcRound = (window.__hcRound||0)+1")
+            .await;
         Ok(text_result(
             serde_json::to_string_pretty(&serde_json::json!({
-                "success": response_len > 0,
-                "rounds": rounds,
-                "response_len": response_len,
-                "debug": debug_rounds,
+                "phase": "need_answer",
+                "round": round + 1,
+                "screenshot": path.to_string_lossy(),
+                "challenge": { "x": cx, "y": cy, "w": cw, "h": ch, "vw": vw, "png_width": png_width },
+                "hint": "Answer not accepted yet — look at the fresh screenshot and call again with the next tiles=[{x,y}...].",
             }))
             .unwrap_or_default(),
         ))
@@ -2796,14 +2778,14 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Solve a CAPTCHA through the configured provider (env GHOSTFOX_CAPTCHA_PROVIDER=2captcha + GHOSTFOX_CAPTCHA_KEY). Turnstile/hcaptcha: pass sitekey + pageurl; image captchas: pass image_base64. Stealth-first: prefer not being challenged at all."
+        description = "Solve an image/text CAPTCHA 100% LOCALLY with the built-in ddddocr ONNX model (no API keys, no third-party services): pass image_base64 (PNG, raw or data-URL). Standalone Turnstile/reCAPTCHA tokens are issued by the vendor server and cannot be minted on-device — for those, solve the interactive challenge on the live page instead (page_hcaptcha for image grids, page_click for checkboxes)."
     )]
     async fn captcha_solve(
         &self,
         Parameters(CaptchaSolveParams {
             session_id,
-            sitekey,
-            pageurl,
+            sitekey: _,
+            pageurl: _,
             image_base64,
         }): Parameters<CaptchaSolveParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
@@ -2814,11 +2796,9 @@ impl GhostcloakServer {
         let started = std::time::Instant::now();
         let result = if let Some(b64) = image_base64 {
             crate::captcha::solve_image(&b64).await
-        } else if let (Some(sitekey), Some(pageurl)) = (sitekey, pageurl) {
-            crate::captcha::solve_turnstile(&sitekey, &pageurl).await
         } else {
             return Err(rmcp::model::ErrorData::invalid_params(
-                "pass image_base64, or sitekey + pageurl".to_string(),
+                crate::captcha::NO_STANDALONE_TOKEN.to_string(),
                 None,
             ));
         };

@@ -2497,6 +2497,80 @@ impl PageHandle for CamoufoxPage {
         Ok(())
     }
 
+    async fn dispatch_wheel(&self, x: f64, y: f64, dx: f64, dy: f64) -> Result<()> {
+        let sid = self.session_id().await?;
+        let payload = serde_json::json!({
+            "x": x, "y": y, "deltaX": dx, "deltaY": dy, "deltaZ": 0, "modifiers": 0
+        });
+        self.conn
+            .request_session("Page.dispatchWheelEvent", payload, Some(&sid))
+            .await?;
+        Ok(())
+    }
+
+    async fn browser_cookies(
+        &self,
+        action: &str,
+        cookies: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        // Browser domain commands live on the ROOT session (no sessionId).
+        match action {
+            "get" => {
+                let r = self
+                    .conn
+                    .request("Browser.getCookies", serde_json::json!({}))
+                    .await?;
+                Ok(r.get("cookies").cloned().unwrap_or(serde_json::json!([])))
+            }
+            "set" => {
+                let n = cookies.as_array().map(|a| a.len()).unwrap_or(0);
+                self.conn
+                    .request(
+                        "Browser.setCookies",
+                        serde_json::json!({ "cookies": cookies }),
+                    )
+                    .await?;
+                Ok(serde_json::json!({ "ok": true, "set": n }))
+            }
+            "clear" => {
+                self.conn
+                    .request("Browser.clearCookies", serde_json::json!({}))
+                    .await?;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            other => Err(GhostError::PageOp(format!(
+                "browser_cookies action must be get|set|clear, got {other}"
+            ))),
+        }
+    }
+
+    async fn grant_permissions(&self, origin: &str, permissions: &[String]) -> Result<()> {
+        self.conn
+            .request(
+                "Browser.grantPermissions",
+                serde_json::json!({ "origin": origin, "permissions": permissions }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn reset_permissions(&self) -> Result<()> {
+        self.conn
+            .request("Browser.resetPermissions", serde_json::json!({}))
+            .await?;
+        Ok(())
+    }
+
+    async fn set_download_options(&self, behavior: &str, dir: &str) -> Result<()> {
+        self.conn
+            .request(
+                "Browser.setDownloadOptions",
+                serde_json::json!({ "downloadOptions": { "behavior": behavior, "downloadsDir": dir } }),
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn screenshot(&self, full_page: bool) -> Result<Vec<u8>> {
         use base64::Engine as _;
         let sid = self.session_id().await?;

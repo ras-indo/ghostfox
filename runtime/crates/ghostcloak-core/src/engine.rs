@@ -352,6 +352,45 @@ pub trait PageHandle: Send + Sync {
             "type_ref not supported by this engine".into(),
         ))
     }
+    /// Dispatch a native wheel (scroll) event at viewport coords (dx/dy px).
+    async fn dispatch_wheel(&self, x: f64, y: f64, dx: f64, dy: f64) -> Result<()> {
+        let _ = (x, y, dx, dy);
+        Err(crate::error::GhostError::PageOp(
+            "dispatch_wheel not supported by this engine".into(),
+        ))
+    }
+    /// Browser-level cookie jar: "get" (ALL cookies incl. httpOnly), "set"
+    /// (array of CookieOptions), "clear". Runs on the root session.
+    async fn browser_cookies(
+        &self,
+        action: &str,
+        cookies: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let _ = cookies;
+        Err(crate::error::GhostError::PageOp(format!(
+            "browser_cookies({action}) not supported by this engine"
+        )))
+    }
+    /// Grant page permissions (geolocation, camera, ...) for an origin.
+    async fn grant_permissions(&self, origin: &str, permissions: &[String]) -> Result<()> {
+        let _ = (origin, permissions);
+        Err(crate::error::GhostError::PageOp(
+            "grant_permissions not supported by this engine".into(),
+        ))
+    }
+    /// Reset all granted permissions for the browser.
+    async fn reset_permissions(&self) -> Result<()> {
+        Err(crate::error::GhostError::PageOp(
+            "reset_permissions not supported by this engine".into(),
+        ))
+    }
+    /// Configure file downloads: "saveToDisk" | "cancel" into `dir`.
+    async fn set_download_options(&self, behavior: &str, dir: &str) -> Result<()> {
+        let _ = (behavior, dir);
+        Err(crate::error::GhostError::PageOp(
+            "set_download_options not supported by this engine".into(),
+        ))
+    }
 }
 
 /// A running engine process managing pages.

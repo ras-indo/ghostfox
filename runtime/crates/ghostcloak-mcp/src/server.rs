@@ -493,6 +493,83 @@ struct HarParams {
     page_id: String,
 }
 
+/// ### BATCH TOOLS 2026-09-29 (native Juggler capabilities)
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ScrollParams {
+    session_id: String,
+    page_id: String,
+    /// Scroll WITHIN this element (it is scrolled into view first, then the
+    /// wheel fires at its center — nested containers scroll correctly).
+    #[serde(default)]
+    selector: Option<String>,
+    /// Viewport x for the wheel (default: element or viewport center).
+    #[serde(default)]
+    x: Option<f64>,
+    /// Viewport y for the wheel (default: element or viewport center).
+    #[serde(default)]
+    y: Option<f64>,
+    /// Horizontal wheel delta in px (positive = right).
+    #[serde(default)]
+    dx: Option<f64>,
+    /// Vertical wheel delta in px (positive = down, negative = up).
+    #[serde(default)]
+    dy: Option<f64>,
+    /// Split into N wheel events for a natural feel (default 8).
+    #[serde(default)]
+    steps: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CookiesParams {
+    session_id: String,
+    page_id: String,
+    /// get | set | clear
+    action: String,
+    /// get: filter by cookie name (exact).
+    #[serde(default)]
+    name: Option<String>,
+    /// get: filter by domain substring.
+    #[serde(default)]
+    domain: Option<String>,
+    /// set: cookies to write — [{name, value, url|domain, path?, secure?,
+    /// httpOnly?, sameSite? (Strict|Lax|None), expires? (unix seconds)}]
+    #[serde(default)]
+    cookies: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PermissionsParams {
+    session_id: String,
+    page_id: String,
+    /// grant | reset
+    action: String,
+    /// grant: origin the permission applies to, e.g. "https://example.com"
+    #[serde(default)]
+    origin: Option<String>,
+    /// grant: ["geolocation","camera","microphone","notifications",
+    /// "clipboard-read","clipboard-write","persistent-storage"]
+    #[serde(default)]
+    permissions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DownloadParams {
+    session_id: String,
+    page_id: String,
+    /// Click this element to start the download (e.g. "a#export").
+    #[serde(default)]
+    selector: Option<String>,
+    /// ...or navigate to a file URL that triggers the download.
+    #[serde(default)]
+    url: Option<String>,
+    /// Destination dir (default /root/tmp/ghostfox-dl, created if missing).
+    #[serde(default)]
+    dir: Option<String>,
+    /// Max wait for a new file to appear (default 20000).
+    #[serde(default)]
+    wait_ms: Option<u64>,
+}
+
 #[derive(Clone, Default)]
 pub struct GhostcloakServer {
     state: Arc<tokio::sync::RwLock<ServerState>>,
@@ -2232,6 +2309,393 @@ impl GhostcloakServer {
                 }
             }))
             .unwrap_or_default(),
+        ))
+    }
+
+    #[tool(
+        description = "NATIVE SCROLL: dispatch REAL mouse-wheel events (Juggler Page.dispatchWheelEvent) instead of JS window.scrollTo — lazy-loaders, infinite feeds and anti-bot scroll detectors see genuine input events. dy px down (negative = up), dx px right; selector scrolls the element into view then wheels at its center (nested containers scroll correctly); steps splits into N events (default 8) for a natural feel. Returns {at, steps, before, after} scroll positions."
+    )]
+    async fn page_scroll(
+        &self,
+        Parameters(ScrollParams {
+            session_id,
+            page_id,
+            selector,
+            x,
+            y,
+            dx,
+            dy,
+            steps,
+        }): Parameters<ScrollParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let dy = dy.unwrap_or(600.0);
+        let dx = dx.unwrap_or(0.0);
+        if dx == 0.0 && dy == 0.0 {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "need dy and/or dx (px)",
+                None,
+            ));
+        }
+        let expr: String = match (&selector, x, y) {
+            (Some(sel), _, _) => format!(
+                "(()=>{{const e=document.querySelector('{}');if(!e)return JSON.stringify({{error:'no element for selector'}});e.scrollIntoView({{block:'center',inline:'center'}});const r=e.getBoundingClientRect();return JSON.stringify({{x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)}})}})()",
+                js_escape(sel)
+            ),
+            (None, Some(px), Some(py)) => format!("JSON.stringify({{x:{px},y:{py}}})"),
+            _ => "JSON.stringify({x:Math.round(innerWidth/2),y:Math.round(innerHeight/2)})"
+                .to_string(),
+        };
+        let v = page
+            .evaluate(&expr)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let at: serde_json::Value =
+            serde_json::from_str(v.as_str().unwrap_or("{}")).unwrap_or(serde_json::json!({}));
+        if let Some(e) = at.get("error") {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                format!("wheel position: {e}"),
+                None,
+            ));
+        }
+        let wx = at["x"].as_f64().unwrap_or(600.0);
+        let wy = at["y"].as_f64().unwrap_or(400.0);
+        let pos_expr = "JSON.stringify({x:Math.round(window.scrollX),y:Math.round(window.scrollY)})";
+        let b = page
+            .evaluate(pos_expr)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let before: serde_json::Value =
+            serde_json::from_str(b.as_str().unwrap_or("{}")).unwrap_or(serde_json::json!({}));
+        let steps = steps.unwrap_or(8).clamp(1, 64);
+        for _ in 0..steps {
+            page.dispatch_wheel(wx, wy, dx / steps as f64, dy / steps as f64)
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            tokio::time::sleep(std::time::Duration::from_millis(6)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await; // compositor settle
+        let a = page
+            .evaluate(pos_expr)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let after: serde_json::Value =
+            serde_json::from_str(a.as_str().unwrap_or("{}")).unwrap_or(serde_json::json!({}));
+        let _ = self.recorder.record(
+            &session_id,
+            "page_scroll",
+            Some(&page_id),
+            serde_json::json!({ "dy": dy, "dx": dx, "steps": steps, "selector": selector }),
+        );
+        Ok(text_result(
+            serde_json::json!({
+                "at": { "x": wx, "y": wy },
+                "steps": steps,
+                "before": before,
+                "after": after
+            })
+            .to_string(),
+        ))
+    }
+
+    #[tool(
+        description = "BROWSER-LEVEL COOKIE JAR (root session): get ALL cookies INCLUDING httpOnly (invisible to JS document.cookie / page_storage), set cookies (name+value+url|domain, path, secure, httpOnly, sameSite, expires), or clear the whole jar. action=get supports name/domain filters; action=set takes cookies=[...]. Use to clone a logged-in jar into a fresh context."
+    )]
+    async fn page_cookies(
+        &self,
+        Parameters(CookiesParams {
+            session_id,
+            page_id,
+            action,
+            name,
+            domain,
+            cookies,
+        }): Parameters<CookiesParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let out = match action.as_str() {
+            "get" => {
+                let arr = page
+                    .browser_cookies("get", serde_json::json!([]))
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+                let mut list: Vec<serde_json::Value> =
+                    arr.as_array().cloned().unwrap_or_default();
+                if let Some(n) = &name {
+                    list.retain(|c| c.get("name").and_then(|v| v.as_str()) == Some(n.as_str()));
+                }
+                if let Some(d) = &domain {
+                    let dl = d.to_lowercase();
+                    list.retain(|c| {
+                        c.get("domain")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_lowercase().contains(&dl))
+                            .unwrap_or(false)
+                    });
+                }
+                let count = list.len();
+                serde_json::json!({ "count": count, "cookies": list })
+            }
+            "set" => {
+                let cookies = cookies.ok_or_else(|| {
+                    rmcp::model::ErrorData::invalid_params("action=set needs cookies=[...]", None)
+                })?;
+                if cookies.is_empty() {
+                    return Err(rmcp::model::ErrorData::invalid_params(
+                        "cookies array is empty",
+                        None,
+                    ));
+                }
+                for (i, c) in cookies.iter().enumerate() {
+                    let has_name = c
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false);
+                    let has_val = c.get("value").is_some();
+                    let has_scope = c
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                        || c
+                            .get("domain")
+                            .and_then(|v| v.as_str())
+                            .map(|s| !s.is_empty())
+                            .unwrap_or(false);
+                    if !has_name || !has_val || !has_scope {
+                        return Err(rmcp::model::ErrorData::invalid_params(
+                            format!(
+                                "cookies[{i}] needs name + value + url|domain (got name={has_name} value={has_val} scope={has_scope})"
+                            ),
+                            None,
+                        ));
+                    }
+                }
+                page.browser_cookies("set", serde_json::json!(cookies))
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+            }
+            "clear" => page
+                .browser_cookies("clear", serde_json::json!(null))
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?,
+            other => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!("action must be get|set|clear, got {other}"),
+                    None,
+                ))
+            }
+        };
+        let _ = self.recorder.record(
+            &session_id,
+            "page_cookies",
+            Some(&page_id),
+            serde_json::json!({ "action": action }),
+        );
+        Ok(text_result(out.to_string()))
+    }
+
+    #[tool(
+        description = "PAGE PERMISSIONS (Browser.grantPermissions / resetPermissions): grant geolocation/camera/microphone/notifications/clipboard-* for an origin BEFORE the page prompts (e.g. allow geo before a maps site loads), or reset ALL grants. action=grant needs origin (\"https://site.tld\") + permissions=[...]; action=reset clears everything."
+    )]
+    async fn page_permissions(
+        &self,
+        Parameters(PermissionsParams {
+            session_id,
+            page_id,
+            action,
+            origin,
+            permissions,
+        }): Parameters<PermissionsParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let out = match action.as_str() {
+            "grant" => {
+                let origin = origin.filter(|o| !o.trim().is_empty()).ok_or_else(|| {
+                    rmcp::model::ErrorData::invalid_params(
+                        "action=grant needs origin, e.g. \"https://example.com\"",
+                        None,
+                    )
+                })?;
+                let perms = permissions.filter(|p| !p.is_empty()).ok_or_else(|| {
+                    rmcp::model::ErrorData::invalid_params(
+                        "action=grant needs permissions=[\"geolocation\", ...]",
+                        None,
+                    )
+                })?;
+                page.grant_permissions(&origin, &perms)
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+                serde_json::json!({ "action": "grant", "origin": origin, "permissions": perms, "ok": true })
+            }
+            "reset" => {
+                page.reset_permissions()
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+                serde_json::json!({ "action": "reset", "ok": true })
+            }
+            other => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!("action must be grant|reset, got {other}"),
+                    None,
+                ))
+            }
+        };
+        let _ = self.recorder.record(
+            &session_id,
+            "page_permissions",
+            Some(&page_id),
+            serde_json::json!({ "action": action }),
+        );
+        Ok(text_result(out.to_string()))
+    }
+
+    #[tool(
+        description = "DOWNLOAD a file through the REAL browser (Browser.setDownloadOptions saveToDisk + Juggler download interceptor — redirects, cookies and auth headers all apply). Trigger via selector (click a download/export button) or url (navigate to a file URL); dir is prepared (default /root/tmp/ghostfox-dl); the tool waits until a NEW file appears and its size stabilizes, then returns {files:[{name,path,size}], dir, elapsed_ms}. Errors if nothing lands within wait_ms (default 20s)."
+    )]
+    async fn page_download(
+        &self,
+        Parameters(DownloadParams {
+            session_id,
+            page_id,
+            selector,
+            url,
+            dir,
+            wait_ms,
+        }): Parameters<DownloadParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        if selector.is_none() && url.is_none() {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "need selector (click target) or url (file to open)",
+                None,
+            ));
+        }
+        let dir = dir.unwrap_or_else(|| "/root/tmp/ghostfox-dl".to_string());
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            rmcp::model::ErrorData::internal_error(format!("mkdir {dir}: {e}"), None)
+        })?;
+        let before: std::collections::HashSet<String> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        page.set_download_options("saveToDisk", &dir)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        if let Some(sel) = &selector {
+            page.click(sel)
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        } else if let Some(u) = &url {
+            page.navigate(u)
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        }
+        let wait = wait_ms.unwrap_or(20_000).clamp(1_000, 120_000);
+        let started = std::time::Instant::now();
+        loop {
+            if started.elapsed().as_millis() as u64 >= wait {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let mut found: Vec<serde_json::Value> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for e in rd.filter_map(|e| e.ok()) {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if !before.contains(&name) {
+                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                        found.push(serde_json::json!({
+                            "name": name,
+                            "path": format!("{dir}/{name}"),
+                            "size": size
+                        }));
+                    }
+                }
+            }
+            if found.is_empty() {
+                continue;
+            }
+            // Wait for sizes to stabilize (file still being written).
+            let mut stable = 0u32;
+            let mut last: Vec<u64> = Vec::new();
+            while stable < 3 && started.elapsed().as_millis() as u64 < wait {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let mut sizes: Vec<u64> = Vec::new();
+                let mut all_ok = true;
+                for f in &found {
+                    match std::fs::metadata(f["path"].as_str().unwrap_or("")) {
+                        Ok(m) => sizes.push(m.len()),
+                        Err(_) => {
+                            all_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if !all_ok {
+                    continue;
+                }
+                if sizes == last {
+                    stable += 1;
+                } else {
+                    stable = 0;
+                    last = sizes.clone();
+                }
+                for (f, s) in found.iter_mut().zip(sizes.iter()) {
+                    f["size"] = (*s).into();
+                }
+            }
+            let _ = self.recorder.record(
+                &session_id,
+                "page_download",
+                Some(&page_id),
+                serde_json::json!({ "dir": dir, "files": found.len() }),
+            );
+            return Ok(text_result(
+                serde_json::json!({
+                    "files": found,
+                    "dir": dir,
+                    "elapsed_ms": started.elapsed().as_millis() as u64
+                })
+                .to_string(),
+            ));
+        }
+        Err(rmcp::model::ErrorData::internal_error(
+            format!(
+                "no new file in {dir} within {wait}ms — the target may not trigger a download (or a save prompt opened instead)"
+            ),
+            None,
         ))
     }
 

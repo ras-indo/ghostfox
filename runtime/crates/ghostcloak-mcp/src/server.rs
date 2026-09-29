@@ -2863,61 +2863,84 @@ impl GhostcloakServer {
     )]
     async fn page_emulate(
         &self,
-        args: EmulateParams,
+        Parameters(EmulateParams {
+            session_id,
+            page_id,
+            color_scheme,
+            online,
+            geolocation,
+            user_agent,
+            timezone,
+            locale,
+            platform,
+            headers,
+            http_auth,
+            viewport,
+            media,
+            reduced_motion,
+            forced_colors,
+            contrast,
+        }): Parameters<EmulateParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
-        let session = self.session(&args.session_id)?;
-        let page = session.page(&args.page_id).await?;
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
         let mut ops = serde_json::Map::new();
         let mut insert = |key: &str, val: serde_json::Value| {
             ops.insert(key.to_string(), val);
         };
-        if let Some(v) = args.color_scheme {
+        if let Some(v) = color_scheme {
             insert("color_scheme", serde_json::json!(v));
         }
-        if let Some(v) = args.media {
+        if let Some(v) = media {
             insert("media", serde_json::json!(v));
         }
-        if let Some(v) = args.reduced_motion {
+        if let Some(v) = reduced_motion {
             insert("reduced_motion", serde_json::json!(v));
         }
-        if let Some(v) = args.forced_colors {
+        if let Some(v) = forced_colors {
             insert("forced_colors", serde_json::json!(v));
         }
-        if let Some(v) = args.contrast {
+        if let Some(v) = contrast {
             insert("contrast", serde_json::json!(v));
         }
-        if let Some(v) = args.viewport {
+        if let Some(v) = viewport {
             insert(
                 "viewport",
                 serde_json::json!({ "width": v.width, "height": v.height }),
             );
         }
-        if let Some(v) = args.online {
+        if let Some(v) = online {
             insert("online", serde_json::json!(v));
         }
-        if let Some(v) = args.geolocation {
+        if let Some(v) = geolocation {
             let mut geo = serde_json::json!({ "latitude": v.latitude, "longitude": v.longitude });
             if let Some(a) = v.accuracy {
                 geo["accuracy"] = serde_json::json!(a);
             }
             insert("geolocation", geo);
         }
-        if let Some(v) = args.user_agent {
+        if let Some(v) = user_agent {
             insert("user_agent", serde_json::json!(v));
         }
-        if let Some(v) = args.timezone {
+        if let Some(v) = timezone {
             insert("timezone", serde_json::json!(v));
         }
-        if let Some(v) = args.locale {
+        if let Some(v) = locale {
             insert("locale", serde_json::json!(v));
         }
-        if let Some(v) = args.platform {
+        if let Some(v) = platform {
             insert("platform", serde_json::json!(v));
         }
-        if let Some(v) = args.headers {
+        if let Some(v) = headers {
             insert("headers", v);
         }
-        if let Some(v) = args.http_auth {
+        if let Some(v) = http_auth {
             insert(
                 "http_auth",
                 serde_json::json!({ "username": v.username, "password": v.password }),
@@ -2932,7 +2955,7 @@ impl GhostcloakServer {
         let res = page
             .emulate(&serde_json::Value::Object(ops))
             .await
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string()))?;
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         Ok(text_result(
             serde_json::to_string_pretty(&res).unwrap_or_default(),
         ))

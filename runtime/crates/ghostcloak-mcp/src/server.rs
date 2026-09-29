@@ -2861,7 +2861,10 @@ impl GhostcloakServer {
         reported individually without rolling back the rest. Omit keys you do NOT need to \
         change."
     )]
-    async fn page_emulate(&self, args: EmulateParams) -> Result<CallToolResult> {
+    async fn page_emulate(
+        &self,
+        args: EmulateParams,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         let session = self.session(&args.session_id)?;
         let page = session.page(&args.page_id).await?;
         let mut ops = serde_json::Map::new();
@@ -2923,10 +2926,16 @@ impl GhostcloakServer {
         if ops.is_empty() {
             return Err(rmcp::model::ErrorData::invalid_params(
                 "no emulation keys provided — send at least one of color_scheme/media/viewport/online/user_agent/timezone/...",
+                None,
             ));
         }
-        let res = page.emulate(&serde_json::Value::Object(ops)).await?;
-        Ok(json_result(res))
+        let res = page
+            .emulate(&serde_json::Value::Object(ops))
+            .await
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string()))?;
+        Ok(text_result(
+            serde_json::to_string_pretty(&res).unwrap_or_default(),
+        ))
     }
 
     #[tool(

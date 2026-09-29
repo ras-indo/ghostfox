@@ -688,5 +688,44 @@ GitHub Release / GHCR push.
 
 ---
 
+## 10. page_ocr — vision-delegated (TEMPORARY, 2026-09-29)
+
+**Decision:** `page_ocr` no longer returns extracted text. It captures the
+region and returns `{file, bytes, hint}` — the MCP client (a vision-capable
+AI agent) reads the saved PNG itself. This is a *temporary* stand-in, not
+the end state.
+
+**Why (evidence chain, all verified 2026-09-29):**
+
+1. ocrs recognition returned garbage on aarch64: input `CONTOH TEKS LOKAL
+   OCR 123` → output `?ONTOUCREKS3LOKAL` / `? ?? EEEEEEE`.
+2. Model files are NOT corrupt — sha256 of both local `.rten` files matches
+   HuggingFace `robertknight/ocrs` byte-for-byte.
+3. Screenshots/crops are NOT wrong — the vision model reads the exact file
+   the OCR pipeline consumes, perfectly.
+4. Switching `.rten` → `.onnx` (the format ocrs 0.13.1 now recommends)
+   changed nothing — still scrambled → not a file-format issue.
+5. Same rten 0.26 runtime runs the GeeTest YOLO model flawlessly (pixel-precise
+   drag solves) → not a broken runtime, an ocrs-model × aarch64 numeric issue.
+
+**What still uses local ML (unchanged, accurate):**
+- `page_captcha_ocr` / `captcha_solve` — ddddocr ONNX (proved against vision:
+  both read `w9h5k`).
+- `page_vision` — ocrs *detection* boxes remain plausible (detection layer
+  behaves; only recognition is scrambled).
+
+**To restore native OCR later:** swap the engine behind the same contract
+(`ocr_png` in `src/ocr.rs`), e.g. PaddleOCR ONNX models through rten, or a
+pinned rten/ocrs pair that behaves on aarch64. The tool contract does not
+change: once `ocr_png` returns sane text again, flip the handler back from
+file-delegation to text output.
+
+**Dead code removed the same day:** `src/hcaptcha.rs` (1600 lines — GLM /
+Qwen / Llama calls against Cloudflare Workers AI) deleted; 0 callers since
+the agent-in-the-loop refactor. No third-party solving path exists anywhere
+in the crate (`grep api.cloudflare.com` → dead code only, now gone).
+
+---
+
 *This playbook is maintained from real runs. When you find a new wall and
 solve it, add it here — the next agent inherits your eyes.*

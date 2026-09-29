@@ -2688,9 +2688,9 @@ impl PageHandle for CamoufoxPage {
         let sid = self.session_id().await?;
         let mut applied: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
-        let mut push_err = |errors: &mut Vec<String>, key: &str, e: anyhow::Error| {
+        fn push_err<E: std::fmt::Display>(errors: &mut Vec<String>, key: &str, e: E) {
             errors.push(format!("{key}: {e}"));
-        };
+        }
 
         // --- Page-level emulation in ONE setEmulatedMedia call ---
         let mut media_p = serde_json::Map::new();

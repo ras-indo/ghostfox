@@ -2116,16 +2116,18 @@ impl GhostcloakServer {
         let method = method.unwrap_or_else(|| "GET".to_string()).to_uppercase();
         let headers_json =
             serde_json::to_string(&headers.unwrap_or_default()).unwrap_or_else(|_| "{}".into());
-        let body_part = match (&body, method.as_str()) {
-            (Some(b), m) if m != "GET" && m != "HEAD" => {
-                format!(",body:{}", serde_json::to_string(b).unwrap_or_default())
-            }
-            _ => String::new(),
-        };
         let url_json = serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".into());
+        // NOTE: synchronous XHR, not fetch — the Juggler Runtime.evaluate
+        // scheme has no awaitPromise (async fetch would never resolve).
         let expr = format!(
-            "(async()=>{{const r=await fetch({url_json},{{method:'{}',credentials:'include',headers:{headers_json}{body_part}}});const t=await r.text();const hd={{}};r.headers.forEach((v,k)=>hd[k]=v);return JSON.stringify({{status:r.status,ok:r.ok,url:r.url,headers:hd,body_len:t.length,body:t.slice(0,2000000)}});}})().catch(e=>JSON.stringify({{error:String(e)}}))",
+            "(()=>{{try{{const x=new XMLHttpRequest();x.open('{}',{url_json},false);x.withCredentials=true;const hd={headers_json};for(const k in hd){{try{{x.setRequestHeader(k,hd[k])}}catch(e)}};x.send({body_part_json});const rh={{}};const raw=x.getAllResponseHeaders()||'';for(const line of raw.trim().split(/\\r?\\n/)){{const i=line.indexOf(':');if(i>0)rh[line.slice(0,i).trim().toLowerCase()]=line.slice(i+1).trim();}}const t=x.responseText||'';return JSON.stringify({{status:x.status,ok:x.status>=200&&x.status<300,url:x.responseURL,headers:rh,body_len:t.length,body:t.slice(0,2000000)}});}}catch(e){{return JSON.stringify({{error:String(e)}})}}}})()",
             js_escape(&method),
+            body_part_json = match (&body, method.as_str()) {
+                (Some(b), m) if m != "GET" && m != "HEAD" => {
+                    serde_json::to_string(b).unwrap_or_default()
+                }
+                _ => "null".to_string(),
+            },
         );
         let r = self
             .page_eval(Parameters(PageEvalParams {

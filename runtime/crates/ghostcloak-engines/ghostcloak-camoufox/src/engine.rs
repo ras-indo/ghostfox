@@ -2596,7 +2596,6 @@ impl PageHandle for CamoufoxPage {
                         "expression": expression,
                         "executionContextId": ctx,
                         "returnByValue": true,
-                        "awaitPromise": true,
                     }),
                     Some(&sid),
                 )

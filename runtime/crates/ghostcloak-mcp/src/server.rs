@@ -2626,7 +2626,7 @@ impl GhostcloakServer {
         let wait = wait_ms.unwrap_or(20_000).clamp(1_000, 120_000);
         let started = std::time::Instant::now();
         loop {
-            if started.elapsed().as_millis() as u64 >= wait {
+            if (started.elapsed().as_millis() as u64) >= wait {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -2650,7 +2650,7 @@ impl GhostcloakServer {
             // Wait for sizes to stabilize (file still being written).
             let mut stable = 0u32;
             let mut last: Vec<u64> = Vec::new();
-            while stable < 3 && started.elapsed().as_millis() as u64 < wait {
+            while stable < 3 && (started.elapsed().as_millis() as u64) < wait {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 let mut sizes: Vec<u64> = Vec::new();
                 let mut all_ok = true;

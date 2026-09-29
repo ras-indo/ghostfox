@@ -1492,8 +1492,8 @@ static DEBUG_REGISTRY: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 fn debug_buffers_for(target_id: &str) -> Arc<DebugBuffers> {
-    let reg = DEBUG_REGISTRY
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let reg =
+        DEBUG_REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut reg = reg.lock().unwrap();
     reg.entry(target_id.to_string())
         .or_insert_with(|| Arc::new(DebugBuffers::new()))
@@ -1530,8 +1530,8 @@ static DIALOG_REGISTRY: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 fn dialog_state_for(target_id: &str) -> Arc<DialogState> {
-    let reg = DIALOG_REGISTRY
-        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let reg =
+        DIALOG_REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut reg = reg.lock().unwrap();
     reg.entry(target_id.to_string())
         .or_insert_with(|| Arc::new(DialogState::default()))
@@ -2612,7 +2612,10 @@ impl PageHandle for CamoufoxPage {
     async fn dialog_setup(&self, accept: bool, prompt_text: Option<String>) -> Result<()> {
         let sid = self.session_id().await?;
         let st = dialog_state_for(&self.target_id);
-        *st.policy.lock().unwrap() = DialogPolicy { accept, prompt_text };
+        *st.policy.lock().unwrap() = DialogPolicy {
+            accept,
+            prompt_text,
+        };
         if st.listening.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return Ok(()); // listener already running
         }
@@ -2642,7 +2645,8 @@ impl PageHandle for CamoufoxPage {
                                     let pol = st2.policy.lock().unwrap();
                                     (pol.accept, pol.prompt_text.clone())
                                 };
-                                let mut hp = serde_json::json!({ "dialogId": dialog_id, "accept": accept });
+                                let mut hp =
+                                    serde_json::json!({ "dialogId": dialog_id, "accept": accept });
                                 if accept {
                                     if let Some(t) = &prompt {
                                         hp["promptText"] = serde_json::json!(t);

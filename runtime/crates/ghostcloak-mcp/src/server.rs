@@ -874,41 +874,49 @@ const SEARCH_JS: &str = r#"(()=>{
   try {
     const src = isRe ? pat : pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     re = new RegExp(src, cs ? "g" : "gi");
-  } catch(e) { return { error: "invalid regex: " + e.message }; }
+  } catch(e){ return {error: "invalid regex: " + e.message}; }
   let roots = [document.body];
   if (scope) {
-    try { roots = Array.from(document.querySelectorAll(scope)); }
-    catch(e) { return { error: "invalid css_scope: " + e.message }; }
-    if (!roots.length) return { found: 0, items: [], note: "css_scope matched 0 elements" };
+    try { roots = Array.from(document.querySelectorAll(scope)); } catch(e){ return {error: "invalid css_scope: " + e.message}; }
+    if (!roots.length) return {found:0, items:[], note:"css_scope matched 0 elements"};
   }
   const items = [];
   let found = 0;
   outer:
   for (const root of roots) {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    // Sites may split text into many nodes (per-letter animation spans):
+    // search the AGGREGATE textContent, then resolve each hit back to an element.
+    const parts = [];
+    let full = "";
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     let n;
-    while ((n = walker.nextNode())) {
-      const t = n.nodeValue || "";
-      re.lastIndex = 0;
-      let m;
-      while ((m = re.exec(t))) {
-        found++;
-        if (items.length >= max) break outer;
-        const i = m.index;
-        const el = n.parentElement;
-        const item = {
-          match: m[0],
-          context: t.slice(Math.max(0, i - Math.floor(ctxN/2)), i + m[0].length + Math.floor(ctxN/2)).replace(/\s+/g, " ").trim(),
-          tag: el ? el.tagName.toLowerCase() : "",
-          offset: i
-        };
-        if (el && el.id) item.id = el.id;
-        items.push(item);
-        if (!m[0].length) re.lastIndex++;
+    while ((n = w.nextNode())) {
+      const v = n.nodeValue || "";
+      parts.push({ node: n, start: full.length, len: v.length });
+      full += v;
+    }
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(full))) {
+      found++;
+      if (items.length >= max) break outer;
+      let el = null;
+      for (const p of parts) {
+        if (m.index >= p.start && m.index < p.start + p.len) { el = p.node.parentElement; break; }
       }
+      const from = Math.max(0, m.index - Math.floor(ctxN / 2));
+      const to = m.index + m[0].length + Math.ceil(ctxN / 2);
+      items.push({
+        match: m[0],
+        context: full.slice(from, to).replace(/\s+/g, " ").trim(),
+        tag: el ? el.tagName.toLowerCase() : "",
+        id: el && el.id ? el.id : undefined,
+        offset: m.index,
+      });
+      if (!m[0].length) re.lastIndex++;
     }
   }
-  return { found: found, items: items, truncated: found > items.length };
+  return {found, items, truncated: found > items.length};
 })()"#;
 
 const QUERY_JS: &str = r#"(()=>{

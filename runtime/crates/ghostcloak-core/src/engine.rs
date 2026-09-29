@@ -391,6 +391,22 @@ pub trait PageHandle: Send + Sync {
             "set_download_options not supported by this engine".into(),
         ))
     }
+    /// Arm the native JS dialog handler (alert/confirm/prompt/beforeunload):
+    /// auto-responds per policy so dialogs never wedge the page, and logs
+    /// every dialog that opened.
+    async fn dialog_setup(&self, accept: bool, prompt_text: Option<String>) -> Result<()> {
+        let _ = (accept, prompt_text);
+        Err(crate::error::GhostError::PageOp(
+            "dialog_setup not supported by this engine".into(),
+        ))
+    }
+    /// Read (and optionally clear) the buffered dialog log for this page.
+    async fn dialog_log(&self, clear: bool) -> Result<serde_json::Value> {
+        let _ = clear;
+        Err(crate::error::GhostError::PageOp(
+            "dialog_log not supported by this engine".into(),
+        ))
+    }
 }
 
 /// A running engine process managing pages.

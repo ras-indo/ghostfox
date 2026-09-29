@@ -570,6 +570,24 @@ struct DownloadParams {
     wait_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DialogParams {
+    session_id: String,
+    page_id: String,
+    /// arm (set auto-responder policy) | list (read the dialog log)
+    #[serde(default)]
+    action: Option<String>,
+    /// arm: accept dialogs (default true). false = dismiss them.
+    #[serde(default)]
+    accept: Option<bool>,
+    /// arm: text to answer prompt() dialogs with (default "").
+    #[serde(default)]
+    prompt_text: Option<String>,
+    /// list: drain the log after reading (default false = keep).
+    #[serde(default)]
+    clear: Option<bool>,
+}
+
 #[derive(Clone, Default)]
 pub struct GhostcloakServer {
     state: Arc<tokio::sync::RwLock<ServerState>>,
@@ -996,6 +1014,15 @@ impl GhostcloakServer {
                         Ok(v) if v.as_bool() == Some(true) => break,
                         _ => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
                     }
+                }
+                // Default dialog policy: accept everything — a bare alert()
+                // otherwise wedges every subsequent eval on this page.
+                // Best-effort: never fail the open over the dialog handler.
+                if let Err(e) = page.dialog_setup(true, Some(String::new())).await {
+                    tracing::warn!(
+                        target: "ghostcloak::dialog",
+                        "page_open auto-arm dialog handler failed for {new_id}: {e}"
+                    );
                 }
             }
         }
@@ -2696,6 +2723,60 @@ impl GhostcloakServer {
             ),
             None,
         ))
+    }
+
+    #[tool(
+        description = "NATIVE JS DIALOG HANDLER (Page.handleDialog): alert()/confirm()/prompt() BLOCK the JS engine — every eval hangs until answered. This tool auto-responds: action=arm sets the policy (accept=true accepts dialogs and answers prompts with prompt_text, accept=false dismisses), and it's armed by default on page_open. action=list reads the log of dialogs that opened {count, events:[{type, message, accepted, handled}]}. Use after evaluating scripts that might pop dialogs."
+    )]
+    async fn page_dialog(
+        &self,
+        Parameters(DialogParams {
+            session_id,
+            page_id,
+            action,
+            accept,
+            prompt_text,
+            clear,
+        }): Parameters<DialogParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let action = action.unwrap_or_else(|| "list".to_string());
+        let out = match action.as_str() {
+            "arm" => {
+                let a = accept.unwrap_or(true);
+                let pt = prompt_text.or_else(|| Some(String::new()));
+                page.dialog_setup(a, pt)
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+                serde_json::json!({ "action": "arm", "accept": a, "ok": true })
+            }
+            "list" => {
+                let c = clear.unwrap_or(false);
+                page.dialog_log(c)
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+            }
+            other => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!("action must be arm|list, got {other}"),
+                    None,
+                ))
+            }
+        };
+        let _ = self.recorder.record(
+            &session_id,
+            "page_dialog",
+            Some(&page_id),
+            serde_json::json!({ "action": action }),
+        );
+        Ok(text_result(out.to_string()))
     }
 
     #[tool(

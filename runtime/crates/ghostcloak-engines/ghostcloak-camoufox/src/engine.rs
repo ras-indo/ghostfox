@@ -1492,11 +1492,49 @@ static DEBUG_REGISTRY: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 fn debug_buffers_for(target_id: &str) -> Arc<DebugBuffers> {
-    let reg =
-        DEBUG_REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let reg = DEBUG_REGISTRY
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut reg = reg.lock().unwrap();
     reg.entry(target_id.to_string())
         .or_insert_with(|| Arc::new(DebugBuffers::new()))
+        .clone()
+}
+
+/// Native JS dialog policy: what to do when alert/confirm/prompt opens.
+#[derive(Debug)]
+struct DialogPolicy {
+    accept: bool,
+    prompt_text: Option<String>,
+}
+
+impl Default for DialogPolicy {
+    fn default() -> Self {
+        // Default: accept everything, answer prompts with "" — dialogs must
+        // never wedge the page (a bare alert() otherwise blocks every eval).
+        Self {
+            accept: true,
+            prompt_text: Some(String::new()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct DialogState {
+    log: std::sync::Mutex<Vec<serde_json::Value>>,
+    listening: std::sync::atomic::AtomicBool,
+    policy: std::sync::Mutex<DialogPolicy>,
+}
+
+static DIALOG_REGISTRY: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Arc<DialogState>>>,
+> = std::sync::OnceLock::new();
+
+fn dialog_state_for(target_id: &str) -> Arc<DialogState> {
+    let reg = DIALOG_REGISTRY
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut reg = reg.lock().unwrap();
+    reg.entry(target_id.to_string())
+        .or_insert_with(|| Arc::new(DialogState::default()))
         .clone()
 }
 
@@ -2569,6 +2607,87 @@ impl PageHandle for CamoufoxPage {
             )
             .await?;
         Ok(())
+    }
+
+    async fn dialog_setup(&self, accept: bool, prompt_text: Option<String>) -> Result<()> {
+        let sid = self.session_id().await?;
+        let st = dialog_state_for(&self.target_id);
+        *st.policy.lock().unwrap() = DialogPolicy { accept, prompt_text };
+        if st.listening.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(()); // listener already running
+        }
+        let conn = self.conn.clone();
+        let st2 = st.clone();
+        tokio::spawn(async move {
+            let mut rx = conn.subscribe();
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        let evt_sid = msg.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+                        if evt_sid != sid {
+                            continue;
+                        }
+                        match msg.get("method").and_then(|m| m.as_str()) {
+                            Some("Page.dialogOpened") => {
+                                let p = msg.get("params").cloned().unwrap_or(serde_json::json!({}));
+                                let dialog_id = p
+                                    .get("dialogId")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                if dialog_id.is_empty() {
+                                    continue;
+                                }
+                                let (accept, prompt) = {
+                                    let pol = st2.policy.lock().unwrap();
+                                    (pol.accept, pol.prompt_text.clone())
+                                };
+                                let mut hp = serde_json::json!({ "dialogId": dialog_id, "accept": accept });
+                                if accept {
+                                    if let Some(t) = &prompt {
+                                        hp["promptText"] = serde_json::json!(t);
+                                    }
+                                }
+                                let handled = conn
+                                    .request_session("Page.handleDialog", hp, Some(&sid))
+                                    .await
+                                    .is_ok();
+                                st2.log.lock().unwrap().push(serde_json::json!({
+                                    "id": dialog_id,
+                                    "type": p.get("type").cloned().unwrap_or(serde_json::json!(null)),
+                                    "message": p.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "accepted": accept,
+                                    "handled": handled,
+                                    "ts": now_ms(),
+                                }));
+                            }
+                            Some("Page.dialogClosed") | Some(_) | None => {}
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn dialog_log(&self, clear: bool) -> Result<serde_json::Value> {
+        let st = dialog_state_for(&self.target_id);
+        let listening = st.listening.load(std::sync::atomic::Ordering::SeqCst);
+        let mut log = st.log.lock().unwrap();
+        let events = if clear {
+            std::mem::take(&mut *log)
+        } else {
+            log.clone()
+        };
+        let count = events.len();
+        let policy = st.policy.lock().unwrap();
+        Ok(serde_json::json!({
+            "count": count,
+            "events": events,
+            "listening": listening,
+            "policy": { "accept": policy.accept, "prompt_text": policy.prompt_text },
+        }))
     }
 
     async fn screenshot(&self, full_page: bool) -> Result<Vec<u8>> {

@@ -86,11 +86,17 @@ Here is what actually works, in order:
    them. Synthetic JS `beforeinput`/paste are rejected.
 5. **Verify, then submit** with `page_click_ref` on the submit button.
 
-### Punctuation caveat (current engine build)
-`page_type` reliably inserts letters, digits, spaces, and `Enter`.
-Punctuation (`. , - : ! ?`) is not inserted by key events in this build —
-write comment text in a natural punctuation-free style (completely normal on
-Reddit/X), using `Enter` for paragraph breaks.
+### Punctuation (fixed — verified 2026-09-29)
+`page_type` inserts the full printable set: letters, digits, ALL punctuation
+(`. , - : ! ? ' " ; : @ # $ % _`), spaces (exactly one — an earlier build
+doubled every space), and `Enter`. Punctuation routes through
+`Page.insertText`, because juggler's key events don't insert
+non-alphanumerics (its CDP-style `keyDown`/`char` types throw, and the
+errors were swallowed). Verified end-to-end on `<input type=text>` and
+plain `contenteditable`: `"ab.cd, ef-gh: ij! kl? mn; 'op' \"qr\" st_uv"`
+lands byte-for-byte. For strict IME-driven composers where a punctuated
+string ever lands incomplete, fall back to `page_type_ref` (separate JS
+path, verified exact) and re-read the editor content to confirm.
 
 ---
 

@@ -588,6 +588,74 @@ struct DialogParams {
     clear: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GeolocationSpec {
+    latitude: f64,
+    longitude: f64,
+    #[serde(default)]
+    accuracy: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct HttpAuthSpec {
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ViewportSpec {
+    width: u64,
+    height: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct EmulateParams {
+    session_id: String,
+    page_id: String,
+    /// "dark" | "light" | "none" (reset) → prefers-color-scheme.
+    #[serde(default)]
+    color_scheme: Option<String>,
+    /// true=online, false=offline → navigator.onLine & network.
+    #[serde(default)]
+    online: Option<bool>,
+    /// {latitude, longitude, accuracy?} — omit to leave untouched.
+    #[serde(default)]
+    geolocation: Option<GeolocationSpec>,
+    /// Override navigator.userAgent.
+    #[serde(default)]
+    user_agent: Option<String>,
+    /// IANA timezone (e.g. "America/New_York").
+    #[serde(default)]
+    timezone: Option<String>,
+    /// BCP-47 language (e.g. "id-ID").
+    #[serde(default)]
+    locale: Option<String>,
+    /// navigator.platform value.
+    #[serde(default)]
+    platform: Option<String>,
+    /// Extra headers sent with EVERY request: {"name": "value"}.
+    #[serde(default)]
+    headers: Option<serde_json::Value>,
+    /// HTTP Basic auth {username, password} for all requests.
+    #[serde(default)]
+    http_auth: Option<HttpAuthSpec>,
+    /// {width, height} window viewport.
+    #[serde(default)]
+    viewport: Option<ViewportSpec>,
+    /// "print" | "screen" | "none" (reset) → matchMedia.
+    #[serde(default)]
+    media: Option<String>,
+    /// "reduce" | "none" → prefers-reduced-motion.
+    #[serde(default)]
+    reduced_motion: Option<String>,
+    /// "active" | "none" → prefers-forced-colors.
+    #[serde(default)]
+    forced_colors: Option<String>,
+    /// "less" | "more" | "custom" | "none" → prefers-contrast.
+    #[serde(default)]
+    contrast: Option<String>,
+}
+
 #[derive(Clone, Default)]
 pub struct GhostcloakServer {
     state: Arc<tokio::sync::RwLock<ServerState>>,
@@ -2777,6 +2845,87 @@ impl GhostcloakServer {
             serde_json::json!({ "action": action }),
         );
         Ok(text_result(out.to_string()))
+    }
+
+    #[tool(
+        name = "page_emulate",
+        title = "Emulate viewport/device/browser state (multi-op)",
+        description = "Apply MANY emulation overrides in ONE call — only the keys you send are \
+        changed. OP KEYS: color_scheme (dark|light|none), media (print|screen|none), \
+        reduced_motion (reduce|none), forced_colors (active|none), contrast \
+        (less|more|custom|none), viewport {width,height}, online (false = simulate offline \
+        traffic), geolocation {latitude,longitude,accuracy?}, user_agent, timezone, locale, \
+        platform, headers {\"name\":\"value\"} sent on EVERY request (auth injection / host \
+        overrides), http_auth {username,password} for HTTP Basic-protected targets. Examples: \
+        set color_scheme=dark before a dark-mode screenshot; set timezone+locale+user_agent \
+        together to align a foreign fingerprint in one shot; set online=false to prove a \
+        feature needs the network. Returns {applied:[keys], errors:[...]} — invalid keys are \
+        reported individually without rolling back the rest. Omit keys you do NOT need to \
+        change."
+    )]
+    async fn page_emulate(&self, args: EmulateParams) -> Result<CallToolResult> {
+        let session = self.session(&args.session_id)?;
+        let page = session.page(&args.page_id).await?;
+        let mut ops = serde_json::Map::new();
+        let mut insert = |key: &str, val: serde_json::Value| {
+            ops.insert(key.to_string(), val);
+        };
+        if let Some(v) = args.color_scheme {
+            insert("color_scheme", serde_json::json!(v));
+        }
+        if let Some(v) = args.media {
+            insert("media", serde_json::json!(v));
+        }
+        if let Some(v) = args.reduced_motion {
+            insert("reduced_motion", serde_json::json!(v));
+        }
+        if let Some(v) = args.forced_colors {
+            insert("forced_colors", serde_json::json!(v));
+        }
+        if let Some(v) = args.contrast {
+            insert("contrast", serde_json::json!(v));
+        }
+        if let Some(v) = args.viewport {
+            insert("viewport", serde_json::json!({ "width": v.width, "height": v.height }));
+        }
+        if let Some(v) = args.online {
+            insert("online", serde_json::json!(v));
+        }
+        if let Some(v) = args.geolocation {
+            let mut geo = serde_json::json!({ "latitude": v.latitude, "longitude": v.longitude });
+            if let Some(a) = v.accuracy {
+                geo["accuracy"] = serde_json::json!(a);
+            }
+            insert("geolocation", geo);
+        }
+        if let Some(v) = args.user_agent {
+            insert("user_agent", serde_json::json!(v));
+        }
+        if let Some(v) = args.timezone {
+            insert("timezone", serde_json::json!(v));
+        }
+        if let Some(v) = args.locale {
+            insert("locale", serde_json::json!(v));
+        }
+        if let Some(v) = args.platform {
+            insert("platform", serde_json::json!(v));
+        }
+        if let Some(v) = args.headers {
+            insert("headers", v);
+        }
+        if let Some(v) = args.http_auth {
+            insert(
+                "http_auth",
+                serde_json::json!({ "username": v.username, "password": v.password }),
+            );
+        }
+        if ops.is_empty() {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "no emulation keys provided — send at least one of color_scheme/media/viewport/online/user_agent/timezone/...",
+            ));
+        }
+        let res = page.emulate(&serde_json::Value::Object(ops)).await?;
+        Ok(json_result(res))
     }
 
     #[tool(

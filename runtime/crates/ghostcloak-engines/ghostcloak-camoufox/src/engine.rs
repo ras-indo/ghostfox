@@ -2684,6 +2684,278 @@ impl PageHandle for CamoufoxPage {
         }))
     }
 
+    async fn emulate(&self, ops: &serde_json::Value) -> Result<serde_json::Value> {
+        let sid = self.session_id().await?;
+        let mut applied: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        let mut push_err = |errors: &mut Vec<String>, key: &str, e: anyhow::Error| {
+            errors.push(format!("{key}: {e}"));
+        };
+
+        // --- Page-level emulation in ONE setEmulatedMedia call ---
+        let mut media_p = serde_json::Map::new();
+        if let Some(v) = ops.get("color_scheme").and_then(|v| v.as_str()) {
+            match v {
+                "dark" | "light" | "none" => {
+                    let cs = if v == "none" { "no-preference" } else { v };
+                    media_p.insert("colorScheme".into(), serde_json::json!(cs));
+                    applied.push("color_scheme".into());
+                }
+                other => errors.push(format!("color_scheme: invalid value {other:?} (dark|light|none)")),
+            }
+        }
+        if let Some(v) = ops.get("reduced_motion").and_then(|v| v.as_str()) {
+            match v {
+                "reduce" | "none" => {
+                    let rm = if v == "none" { "no-preference" } else { v };
+                    media_p.insert("reducedMotion".into(), serde_json::json!(rm));
+                    applied.push("reduced_motion".into());
+                }
+                other => errors.push(format!("reduced_motion: invalid value {other:?} (reduce|none)")),
+            }
+        }
+        if let Some(v) = ops.get("forced_colors").and_then(|v| v.as_str()) {
+            match v {
+                "active" | "none" => {
+                    media_p.insert("forcedColors".into(), serde_json::json!(v));
+                    applied.push("forced_colors".into());
+                }
+                other => errors.push(format!("forced_colors: invalid value {other:?} (active|none)")),
+            }
+        }
+        if let Some(v) = ops.get("contrast").and_then(|v| v.as_str()) {
+            match v {
+                "less" | "more" | "custom" | "none" => {
+                    let c = if v == "none" { "no-preference" } else { v };
+                    media_p.insert("contrast".into(), serde_json::json!(c));
+                    applied.push("contrast".into());
+                }
+                other => errors.push(format!("contrast: invalid value {other:?} (less|more|custom|none)")),
+            }
+        }
+        if let Some(v) = ops.get("media").and_then(|v| v.as_str()) {
+            match v {
+                "print" | "screen" | "none" => {
+                    media_p.insert("type".into(), serde_json::json!(v));
+                    applied.push("media".into());
+                }
+                other => errors.push(format!("media: invalid value {other:?} (print|screen|none)")),
+            }
+        }
+        if !media_p.is_empty() {
+            if let Err(e) = self
+                .conn
+                .request_session("Page.setEmulatedMedia", serde_json::Value::Object(media_p), Some(&sid))
+                .await
+            {
+                push_err(&mut errors, "media", e);
+            }
+        }
+
+        // --- Page.setViewportSize ---
+        if let Some(v) = ops.get("viewport") {
+            if v.is_null() {
+                if let Err(e) = self
+                    .conn
+                    .request_session(
+                        "Page.setViewportSize",
+                        serde_json::json!({ "viewportSize": serde_json::Value::Null }),
+                        Some(&sid),
+                    )
+                    .await
+                {
+                    push_err(&mut errors, "viewport", e);
+                } else {
+                    applied.push("viewport".into());
+                }
+            } else {
+                let w = v.get("width").and_then(|x| x.as_u64());
+                let h = v.get("height").and_then(|x| x.as_u64());
+                match (w, h) {
+                    (Some(w), Some(h)) => {
+                        if let Err(e) = self
+                            .conn
+                            .request_session(
+                                "Page.setViewportSize",
+                                serde_json::json!({ "viewportSize": { "width": w, "height": h } }),
+                                Some(&sid),
+                            )
+                            .await
+                        {
+                            push_err(&mut errors, "viewport", e);
+                        } else {
+                            applied.push("viewport".into());
+                        }
+                    }
+                    _ => errors.push("viewport: need {width, height}".into()),
+                }
+            }
+        }
+
+        // --- Browser-level overrides (root session) ---
+        if let Some(v) = ops.get("online") {
+            let override_val = match v.as_bool() {
+                Some(true) => "online",
+                Some(false) => "offline",
+                None => { errors.push("online: need true|false".into()); "" }
+            };
+            if !override_val.is_empty() {
+                if let Err(e) = self
+                    .conn
+                    .request(
+                        "Browser.setOnlineOverride",
+                        serde_json::json!({ "override": override_val }),
+                    )
+                    .await
+                {
+                    push_err(&mut errors, "online", e);
+                } else {
+                    applied.push("online".into());
+                }
+            }
+        }
+        if let Some(v) = ops.get("geolocation") {
+            let params = if v.is_null() {
+                serde_json::json!({ "geolocation": serde_json::Value::Null })
+            } else {
+                let lat = v.get("latitude").and_then(|x| x.as_f64());
+                let lon = v.get("longitude").and_then(|x| x.as_f64());
+                match (lat, lon) {
+                    (Some(lat), Some(lon)) => {
+                        let mut geo = serde_json::json!({ "latitude": lat, "longitude": lon });
+                        if let Some(a) = v.get("accuracy").and_then(|x| x.as_f64()) {
+                            geo["accuracy"] = serde_json::json!(a);
+                        }
+                        serde_json::json!({ "geolocation": geo })
+                    }
+                    _ => {
+                        errors.push("geolocation: need {latitude, longitude} or null".into());
+                        serde_json::Value::Null
+                    }
+                }
+            };
+            if !params.is_null() {
+                if let Err(e) = self.conn.request("Browser.setGeolocationOverride", params).await {
+                    push_err(&mut errors, "geolocation", e);
+                } else {
+                    applied.push("geolocation".into());
+                }
+            }
+        }
+        if let Some(v) = ops.get("user_agent") {
+            let params = if v.is_null() {
+                serde_json::json!({ "userAgent": serde_json::Value::Null })
+            } else {
+                match v.as_str() {
+                    Some(s) => serde_json::json!({ "userAgent": s }),
+                    None => { errors.push("user_agent: need string or null".into()); serde_json::Value::Null }
+                }
+            };
+            if !params.is_null() {
+                if let Err(e) = self.conn.request("Browser.setUserAgentOverride", params).await {
+                    push_err(&mut errors, "user_agent", e);
+                } else {
+                    applied.push("user_agent".into());
+                }
+            }
+        }
+        if let Some(v) = ops.get("timezone") {
+            let params = if v.is_null() {
+                serde_json::json!({ "timezoneId": serde_json::Value::Null })
+            } else {
+                match v.as_str() {
+                    Some(s) => serde_json::json!({ "timezoneId": s }),
+                    None => { errors.push("timezone: need string or null".into()); serde_json::Value::Null }
+                }
+            };
+            if !params.is_null() {
+                if let Err(e) = self.conn.request("Browser.setTimezoneOverride", params).await {
+                    push_err(&mut errors, "timezone", e);
+                } else {
+                    applied.push("timezone".into());
+                }
+            }
+        }
+        if let Some(v) = ops.get("locale") {
+            let params = if v.is_null() {
+                serde_json::json!({ "locale": serde_json::Value::Null })
+            } else {
+                match v.as_str() {
+                    Some(s) => serde_json::json!({ "locale": s }),
+                    None => { errors.push("locale: need string or null".into()); serde_json::Value::Null }
+                }
+            };
+            if !params.is_null() {
+                if let Err(e) = self.conn.request("Browser.setLocaleOverride", params).await {
+                    push_err(&mut errors, "locale", e);
+                } else {
+                    applied.push("locale".into());
+                }
+            }
+        }
+        if let Some(v) = ops.get("platform") {
+            let params = if v.is_null() {
+                serde_json::json!({ "platform": serde_json::Value::Null })
+            } else {
+                match v.as_str() {
+                    Some(s) => serde_json::json!({ "platform": s }),
+                    None => { errors.push("platform: need string or null".into()); serde_json::Value::Null }
+                }
+            };
+            if !params.is_null() {
+                if let Err(e) = self.conn.request("Browser.setPlatformOverride", params).await {
+                    push_err(&mut errors, "platform", e);
+                } else {
+                    applied.push("platform".into());
+                }
+            }
+        }
+        if let Some(v) = ops.get("headers") {
+            let params = if v.is_null() {
+                serde_json::json!({ "headers": serde_json::json!([]) })
+            } else if let Some(map) = v.as_object() {
+                let list: Vec<serde_json::Value> = map
+                    .iter()
+                    .map(|(k, val)| {
+                        serde_json::json!({ "name": k, "value": val.as_str().unwrap_or_default() })
+                    })
+                    .collect();
+                serde_json::json!({ "headers": list })
+            } else {
+                errors.push("headers: need object {name: value} or null".into());
+                serde_json::Value::Null
+            };
+            if !params.is_null() {
+                if let Err(e) = self.conn.request("Browser.setExtraHTTPHeaders", params).await {
+                    push_err(&mut errors, "headers", e);
+                } else {
+                    applied.push("headers".into());
+                }
+            }
+        }
+        if let Some(v) = ops.get("http_auth") {
+            let params = if v.is_null() {
+                serde_json::json!({ "credentials": serde_json::Value::Null })
+            } else {
+                let u = v.get("username").and_then(|x| x.as_str());
+                let p = v.get("password").and_then(|x| x.as_str());
+                match (u, p) {
+                    (Some(u), Some(p)) => serde_json::json!({ "credentials": { "username": u, "password": p } }),
+                    _ => { errors.push("http_auth: need {username, password} or null".into()); serde_json::Value::Null }
+                }
+            };
+            if !params.is_null() {
+                if let Err(e) = self.conn.request("Browser.setHTTPCredentials", params).await {
+                    push_err(&mut errors, "http_auth", e);
+                } else {
+                    applied.push("http_auth".into());
+                }
+            }
+        }
+
+        Ok(serde_json::json!({ "applied": applied, "errors": errors }))
+    }
+
     async fn screenshot(&self, full_page: bool) -> Result<Vec<u8>> {
         use base64::Engine as _;
         let sid = self.session_id().await?;

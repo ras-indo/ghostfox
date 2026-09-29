@@ -141,13 +141,15 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
         "page_permissions",
         "page_download",
         "page_dialog",
+        "page_emulate",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }
     // Guard against accidental tool loss: this is the exact count currently
     // exposed by GhostcloakServer. If a tool is ever removed (or added),
     // update this list deliberately — never silently drop tools.
-    assert_eq!(names.len(), 62, "tools: {names:?}");
+    // Batch 1 (9) + batch 2 (4) + page_dialog (1) + page_emulate (1) = 63.
+    assert_eq!(names.len(), 63, "tools: {names:?}");
 
     let generated = request(
         &mut child,

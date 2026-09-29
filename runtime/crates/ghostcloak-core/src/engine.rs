@@ -407,6 +407,17 @@ pub trait PageHandle: Send + Sync {
             "dialog_log not supported by this engine".into(),
         ))
     }
+    /// Apply browser emulation ops — a JSON map of the keys this engine
+    /// understands (color_scheme, media, reduced_motion, forced_colors,
+    /// contrast, viewport, online, geolocation, user_agent, timezone,
+    /// locale, platform, headers, http_auth). Keys absent from the map are
+    /// left untouched. Returns `{applied:[...], errors:[...]}` — partial
+    /// success is reported per key instead of aborting the whole batch.
+    async fn emulate(&self, _ops: &serde_json::Value) -> Result<serde_json::Value> {
+        Err(crate::error::GhostError::PageOp(
+            "emulate not supported by this engine".into(),
+        ))
+    }
 }
 
 /// A running engine process managing pages.

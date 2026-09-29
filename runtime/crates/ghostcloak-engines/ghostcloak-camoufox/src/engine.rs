@@ -1826,10 +1826,8 @@ impl PageHandle for CamoufoxPage {
             // Space/Enter/Tab MUST stay out of this branch: plain
             // keydown already inserts them, and inserting again doubled
             // every space ("aa  bb").
-            let needs_text_insert = k != " "
-                && k != "\n"
-                && k != "\t"
-                && !k.chars().all(|c| c.is_ascii_alphanumeric());
+            let needs_text_insert =
+                k != " " && k != "\n" && k != "\t" && !k.chars().all(|c| c.is_ascii_alphanumeric());
             for ty in ["keydown", "keyup"] {
                 let _ = self
                     .conn

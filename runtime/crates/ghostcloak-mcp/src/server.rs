@@ -2848,8 +2848,6 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        name = "page_emulate",
-        title = "Emulate viewport/device/browser state (multi-op)",
         description = "Apply MANY emulation overrides in ONE call — only the keys you send are \
         changed. OP KEYS: color_scheme (dark|light|none), media (print|screen|none), \
         reduced_motion (reduce|none), forced_colors (active|none), contrast \

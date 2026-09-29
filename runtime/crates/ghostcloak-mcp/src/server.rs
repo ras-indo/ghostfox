@@ -1324,7 +1324,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "TIER 2 VISION — LOCAL OCR: extract text from an element (or the whole viewport if no ref). 100% local (pure-Rust ML models auto-download once to GHOSTFOX_HOME/models). Answers 'what text is written there' — for image captchas, canvas text, scanned UI. Models download on first call (~12MB, once)."
+        description = "TIER 2 VISION — EXTRACT TEXT: capture the text region of an element (or the whole viewport if no ref) and return the saved PNG for VISION-BASED reading. TEMPORARY behavior: local ocrs recognition is unreliable on aarch64, so instead of returning extracted text this returns {file, bytes} — the caller (an AI agent with a vision model) reads the image directly. For captcha images use page_captcha_ocr or captcha_solve (local ddddocr, accurate)."
     )]
     async fn page_ocr(
         &self,
@@ -1335,16 +1335,29 @@ impl GhostcloakServer {
         }): Parameters<OcrParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         let png = self.element_png(&session_id, &page_id, r#ref).await?;
-        let text = crate::ocr::ocr_png(&png)
-            .await
+        // TEMPORARY (2026-09-29): ocrs recognition output is scrambled on
+        // aarch64 (rten 0.26 numeric issue with these models — model files
+        // hash-verified intact, screenshots vision-verified correct), so
+        // text extraction is delegated to the caller's vision model: save
+        // the captured region and return its path instead of garbage text.
+        let path = self
+            .recorder
+            .record_screenshot(&session_id, &page_id, &png)
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         let _ = self.recorder.record(
             &session_id,
             "page_ocr",
             Some(&page_id),
-            serde_json::json!({ "chars": text.chars().count() }),
+            serde_json::json!({ "vision_delegated": true, "bytes": png.len() }),
         );
-        Ok(text_result(text))
+        Ok(text_result(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "file": path.to_string_lossy(),
+                "bytes": png.len(),
+                "hint": "local OCR is degraded on this architecture (temporary) — read the image with your vision model; for captcha images use page_captcha_ocr (local ddddocr, accurate)",
+            }))
+            .unwrap_or_default(),
+        ))
     }
 
     #[tool(

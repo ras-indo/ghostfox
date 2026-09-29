@@ -1696,7 +1696,10 @@ impl GhostcloakServer {
             let av: serde_json::Value = serde_json::from_str(av_out.as_str().unwrap_or("{}"))
                 .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
             if let Some(err) = av.get("err").and_then(|e| e.as_str()) {
-                return Err(rmcp::model::ErrorData::internal_error(err.to_string(), None));
+                return Err(rmcp::model::ErrorData::internal_error(
+                    err.to_string(),
+                    None,
+                ));
             }
             let (ax, ay) = (
                 av.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -1714,14 +1717,13 @@ impl GhostcloakServer {
                 }
             }
         }
-        let chall: serde_json::Value = serde_json::from_str(out.as_str().unwrap_or("")).map_err(
-            |_| {
+        let chall: serde_json::Value =
+            serde_json::from_str(out.as_str().unwrap_or("")).map_err(|_| {
                 rmcp::model::ErrorData::internal_error(
                     "hCaptcha challenge iframe never appeared",
                     None,
                 )
-            },
-        )?;
+            })?;
         let (cx, cy, cw, ch, vw) = (
             chall.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
             chall.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -1730,7 +1732,10 @@ impl GhostcloakServer {
             chall.get("vw").and_then(|v| v.as_f64()).unwrap_or(1.0),
         );
         let round_now = async {
-            let out = page.evaluate("String(window.__hcRound||0)").await.unwrap_or_default();
+            let out = page
+                .evaluate("String(window.__hcRound||0)")
+                .await
+                .unwrap_or_default();
             out.as_str().unwrap_or("0").parse::<u32>().unwrap_or(0)
         }
         .await;

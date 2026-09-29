@@ -2367,7 +2367,8 @@ impl GhostcloakServer {
         }
         let wx = at["x"].as_f64().unwrap_or(600.0);
         let wy = at["y"].as_f64().unwrap_or(400.0);
-        let pos_expr = "JSON.stringify({x:Math.round(window.scrollX),y:Math.round(window.scrollY)})";
+        let pos_expr =
+            "JSON.stringify({x:Math.round(window.scrollX),y:Math.round(window.scrollY)})";
         let b = page
             .evaluate(pos_expr)
             .await
@@ -2433,8 +2434,7 @@ impl GhostcloakServer {
                     .browser_cookies("get", serde_json::json!([]))
                     .await
                     .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-                let mut list: Vec<serde_json::Value> =
-                    arr.as_array().cloned().unwrap_or_default();
+                let mut list: Vec<serde_json::Value> = arr.as_array().cloned().unwrap_or_default();
                 if let Some(n) = &name {
                     list.retain(|c| c.get("name").and_then(|v| v.as_str()) == Some(n.as_str()));
                 }
@@ -2472,8 +2472,7 @@ impl GhostcloakServer {
                         .and_then(|v| v.as_str())
                         .map(|s| !s.is_empty())
                         .unwrap_or(false)
-                        || c
-                            .get("domain")
+                        || c.get("domain")
                             .and_then(|v| v.as_str())
                             .map(|s| !s.is_empty())
                             .unwrap_or(false);

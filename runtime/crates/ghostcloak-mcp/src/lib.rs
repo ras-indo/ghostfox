@@ -11,7 +11,6 @@ pub mod http;
 mod captcha;
 mod ddddocr;
 mod geetest;
-mod hcaptcha;
 mod liveview;
 mod ocr;
 pub mod recording;

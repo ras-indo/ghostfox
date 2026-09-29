@@ -17,9 +17,9 @@ use rten::Model;
 use rten_tensor::Layout as _;
 
 const DETECTION_URL: &str =
-    "https://huggingface.co/robertknight/ocrs/resolve/main/text-detection-ssfbcj81.rten";
+    "https://huggingface.co/robertknight/ocrs/resolve/main/text-detection-ssfbcj81.onnx";
 const RECOGNITION_URL: &str =
-    "https://huggingface.co/robertknight/ocrs/resolve/main/text-rec-checkpoint-s52qdbqt.rten";
+    "https://huggingface.co/robertknight/ocrs/resolve/main/text-rec-checkpoint-s52qdbqt.onnx";
 
 fn models_dir() -> PathBuf {
     let home = std::env::var("GHOSTFOX_HOME").unwrap_or_else(|_| {
@@ -59,8 +59,8 @@ async fn download(url: &str, to: &PathBuf) -> Result<()> {
 async fn ensure_models() -> Result<(PathBuf, PathBuf)> {
     let dir = models_dir();
     tokio::fs::create_dir_all(&dir).await?;
-    let det = dir.join("text-detection-ssfbcj81.rten");
-    let rec = dir.join("text-rec-checkpoint-s52qdbqt.rten");
+    let det = dir.join("text-detection-ssfbcj81.onnx");
+    let rec = dir.join("text-rec-checkpoint-s52qdbqt.onnx");
     if !det.exists() {
         download(DETECTION_URL, &det).await?;
     }

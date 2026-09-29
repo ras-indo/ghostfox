@@ -468,6 +468,27 @@ struct ScrollTextParams {
     direction: Option<String>,
 }
 
+/// One field entry for page_fill_form: selector + value (text/select) or checked (checkbox/radio).
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FillField {
+    /// CSS selector for the form control.
+    selector: String,
+    /// Value for input/textarea/select (option text or value for select).
+    #[serde(default)]
+    value: Option<String>,
+    /// Desired state for checkbox/radio.
+    #[serde(default)]
+    checked: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct FillFormParams {
+    session_id: String,
+    page_id: String,
+    /// [{selector, value|checked}] — mixed types in one call.
+    fields: Vec<FillField>,
+}
+
 // ===== BATCH TOOLS (added 2026-09-29: extraction/scraping/debug layer) =====
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -865,6 +886,63 @@ const MARKDOWN_JS: &str = r#"(()=>{
   let md = (document.title ? '# ' + document.title + '\n' : '') + conv(root);
   md = md.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   return { markdown: md.slice(0, 300000), chars: md.length };
+})()"#;
+
+const FILLFORM_JS: &str = r#"(()=>{
+  const fields = @@FIELDS@@;
+  const results = [];
+  for (const f of fields) {
+    const sel = f.selector;
+    let el;
+    try { el = document.querySelector(sel); }
+    catch(e) { results.push({selector: sel, ok: false, error: "invalid selector: " + e.message}); continue; }
+    if (!el) { results.push({selector: sel, ok: false, error: "no element matches " + sel}); continue; }
+    const tag = el.tagName;
+    try {
+      if (tag === "SELECT") {
+        if (f.value === undefined || f.value === null) { results.push({selector: sel, ok: false, error: "select requires value"}); continue; }
+        const opts = Array.from(el.options);
+        let idx = opts.findIndex(o => o.value === f.value);
+        if (idx < 0) idx = opts.findIndex(o => o.text.trim() === f.value);
+        if (idx < 0) { results.push({selector: sel, ok: false, error: "no option matches value", available: opts.slice(0, 30).map(o => o.text.trim())}); continue; }
+        if (opts[idx].disabled) { results.push({selector: sel, ok: false, error: "matched option is disabled"}); continue; }
+        el.selectedIndex = idx;
+        el.dispatchEvent(new Event("input", {bubbles: true}));
+        el.dispatchEvent(new Event("change", {bubbles: true}));
+        results.push({selector: sel, ok: true, kind: "select", value: opts[idx].value});
+        continue;
+      }
+      if (tag === "INPUT") {
+        const type = (el.type || "text").toLowerCase();
+        if (type === "checkbox" || type === "radio") {
+          if (f.checked === undefined || f.checked === null) { results.push({selector: sel, ok: false, error: type + " requires checked boolean"}); continue; }
+          if (el.disabled) { results.push({selector: sel, ok: false, error: "element disabled"}); continue; }
+          if (el.checked !== !!f.checked) el.click();
+          results.push({selector: sel, ok: el.checked === !!f.checked, kind: type, checked: el.checked});
+          continue;
+        }
+        if (el.disabled || el.readOnly) { results.push({selector: sel, ok: false, error: "element disabled/readonly"}); continue; }
+        el.value = (f.value === undefined || f.value === null) ? "" : String(f.value);
+        el.dispatchEvent(new Event("input", {bubbles: true}));
+        el.dispatchEvent(new Event("change", {bubbles: true}));
+        results.push({selector: sel, ok: true, kind: type, value: el.value});
+        continue;
+      }
+      if (tag === "TEXTAREA") {
+        if (el.disabled || el.readOnly) { results.push({selector: sel, ok: false, error: "element disabled/readonly"}); continue; }
+        el.value = (f.value === undefined || f.value === null) ? "" : String(f.value);
+        el.dispatchEvent(new Event("input", {bubbles: true}));
+        el.dispatchEvent(new Event("change", {bubbles: true}));
+        results.push({selector: sel, ok: true, kind: "textarea", value: el.value.slice(0, 120)});
+        continue;
+      }
+      results.push({selector: sel, ok: false, error: "unsupported element: " + tag});
+    } catch(e) {
+      results.push({selector: sel, ok: false, error: String(e && e.message || e)});
+    }
+  }
+  const applied = results.filter(r => r.ok).length;
+  return {total: fields.length, applied, failed: results.length - applied, results};
 })()"#;
 
 const SEARCH_JS: &str = r#"(()=>{
@@ -3385,6 +3463,56 @@ impl GhostcloakServer {
             "page_scroll_to_text",
             Some(&page_id),
             serde_json::json!({ "text": text, "direction": dir }),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "BATCH FORM FILL (from chrome-devtools fill_form): set many controls in one call — \
+        text inputs, textareas, selects, checkboxes, radios. fields: [{selector, value} for \
+        text/select, {selector, checked} for checkbox/radio]. Select value matches option VALUE first, \
+        then option TEXT. Dispatches input/change (or click for checkbox/radio) so framework listeners \
+        (React/Vue) fire. Partial report: each field returns {selector, ok, error?} — failed fields \
+        never abort the batch. Read-only/disabled controls are skipped with a clear error. One call \
+        beats N page_fill calls — use for any form with 2+ fields."
+    )]
+    async fn page_fill_form(
+        &self,
+        Parameters(FillFormParams {
+            session_id,
+            page_id,
+            fields,
+        }): Parameters<FillFormParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        if fields.is_empty() {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "fields array is empty — provide at least one {selector, value|checked}",
+                None,
+            ));
+        }
+        if fields.len() > 100 {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "fields exceeds 100 — split into smaller batches",
+                None,
+            ));
+        }
+        let expr = FILLFORM_JS.replace(
+            "@@FIELDS@@",
+            &serde_json::to_string(&fields)
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?,
+        );
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_fill_form",
+            Some(&page_id),
+            serde_json::json!({ "fields": fields.len() }),
         );
         Ok(r)
     }

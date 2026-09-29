@@ -1813,11 +1813,15 @@ impl PageHandle for CamoufoxPage {
             };
             let Some((k, kc, code)) = spec else { continue };
             // Printable non-alphanumeric chars (punctuation etc.) don't
-            // insert via keydown/keyup in this engine build. The standard
-            // CDP insertion path is a keyDown carrying a "text" field (plus
-            // a "char" event for engines that model it); send both forms
-            // for punctuation. Letters/digits/space insert fine with the
-            // plain key events.
+            // insert via plain key events in this engine build. Juggler's
+            // dispatchKeyEvent only inserts text through a keydown whose
+            // `text` differs from `key` (commitCompositionWith), and it
+            // THROWS on CDP-style types ('keyDown'/'char'/'keyUp' — the
+            // protocol wants lowercase 'keydown'/'keyup'). Those throws
+            // used to be silently swallowed (`let _ =`) and punctuation
+            // vanished. Route punctuation through `Page.insertText`
+            // (IME-like commit at the caret); the keydown/keyup above
+            // still fire for keystroke-dynamics realism.
             let needs_text_insert = !k.chars().all(|c| c.is_ascii_alphanumeric());
             for ty in ["keydown", "keyup"] {
                 let _ = self
@@ -1837,36 +1841,16 @@ impl PageHandle for CamoufoxPage {
                     .await;
             }
             if needs_text_insert {
-                let payloads = [
-                    serde_json::json!({
-                        "type": "keyDown",
-                        "key": k,
-                        "keyCode": kc,
-                        "location": 0,
-                        "code": code,
-                        "repeat": false,
-                        "text": k,
-                    }),
-                    serde_json::json!({
-                        "type": "char",
-                        "text": k,
-                        "key": k,
-                    }),
-                    serde_json::json!({
-                        "type": "keyUp",
-                        "key": k,
-                        "keyCode": kc,
-                        "location": 0,
-                        "code": code,
-                        "repeat": false,
-                    }),
-                ];
-                for payload in payloads {
-                    let _ = self
-                        .conn
-                        .request_session("Page.dispatchKeyEvent", payload, Some(&sid))
-                        .await;
-                }
+                self.conn
+                    .request_session(
+                        "Page.insertText",
+                        serde_json::json!({ "text": k }),
+                        Some(&sid),
+                    )
+                    .await
+                    .map_err(|e| {
+                        GhostError::PageOp(format!("insertText({k:?}) failed: {e}"))
+                    })?;
             }
             // Humanized cadence between keystrokes:
             //  - base 45-110ms per char (average typist)

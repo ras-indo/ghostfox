@@ -2701,7 +2701,9 @@ impl PageHandle for CamoufoxPage {
                     media_p.insert("colorScheme".into(), serde_json::json!(cs));
                     applied.push("color_scheme".into());
                 }
-                other => errors.push(format!("color_scheme: invalid value {other:?} (dark|light|none)")),
+                other => errors.push(format!(
+                    "color_scheme: invalid value {other:?} (dark|light|none)"
+                )),
             }
         }
         if let Some(v) = ops.get("reduced_motion").and_then(|v| v.as_str()) {
@@ -2711,7 +2713,9 @@ impl PageHandle for CamoufoxPage {
                     media_p.insert("reducedMotion".into(), serde_json::json!(rm));
                     applied.push("reduced_motion".into());
                 }
-                other => errors.push(format!("reduced_motion: invalid value {other:?} (reduce|none)")),
+                other => errors.push(format!(
+                    "reduced_motion: invalid value {other:?} (reduce|none)"
+                )),
             }
         }
         if let Some(v) = ops.get("forced_colors").and_then(|v| v.as_str()) {
@@ -2720,7 +2724,9 @@ impl PageHandle for CamoufoxPage {
                     media_p.insert("forcedColors".into(), serde_json::json!(v));
                     applied.push("forced_colors".into());
                 }
-                other => errors.push(format!("forced_colors: invalid value {other:?} (active|none)")),
+                other => errors.push(format!(
+                    "forced_colors: invalid value {other:?} (active|none)"
+                )),
             }
         }
         if let Some(v) = ops.get("contrast").and_then(|v| v.as_str()) {
@@ -2730,7 +2736,9 @@ impl PageHandle for CamoufoxPage {
                     media_p.insert("contrast".into(), serde_json::json!(c));
                     applied.push("contrast".into());
                 }
-                other => errors.push(format!("contrast: invalid value {other:?} (less|more|custom|none)")),
+                other => errors.push(format!(
+                    "contrast: invalid value {other:?} (less|more|custom|none)"
+                )),
             }
         }
         if let Some(v) = ops.get("media").and_then(|v| v.as_str()) {
@@ -2739,13 +2747,19 @@ impl PageHandle for CamoufoxPage {
                     media_p.insert("type".into(), serde_json::json!(v));
                     applied.push("media".into());
                 }
-                other => errors.push(format!("media: invalid value {other:?} (print|screen|none)")),
+                other => errors.push(format!(
+                    "media: invalid value {other:?} (print|screen|none)"
+                )),
             }
         }
         if !media_p.is_empty() {
             if let Err(e) = self
                 .conn
-                .request_session("Page.setEmulatedMedia", serde_json::Value::Object(media_p), Some(&sid))
+                .request_session(
+                    "Page.setEmulatedMedia",
+                    serde_json::Value::Object(media_p),
+                    Some(&sid),
+                )
                 .await
             {
                 push_err(&mut errors, "media", e);
@@ -2797,7 +2811,10 @@ impl PageHandle for CamoufoxPage {
             let override_val = match v.as_bool() {
                 Some(true) => "online",
                 Some(false) => "offline",
-                None => { errors.push("online: need true|false".into()); "" }
+                None => {
+                    errors.push("online: need true|false".into());
+                    ""
+                }
             };
             if !override_val.is_empty() {
                 if let Err(e) = self
@@ -2835,7 +2852,11 @@ impl PageHandle for CamoufoxPage {
                 }
             };
             if !params.is_null() {
-                if let Err(e) = self.conn.request("Browser.setGeolocationOverride", params).await {
+                if let Err(e) = self
+                    .conn
+                    .request("Browser.setGeolocationOverride", params)
+                    .await
+                {
                     push_err(&mut errors, "geolocation", e);
                 } else {
                     applied.push("geolocation".into());
@@ -2848,11 +2869,18 @@ impl PageHandle for CamoufoxPage {
             } else {
                 match v.as_str() {
                     Some(s) => serde_json::json!({ "userAgent": s }),
-                    None => { errors.push("user_agent: need string or null".into()); serde_json::Value::Null }
+                    None => {
+                        errors.push("user_agent: need string or null".into());
+                        serde_json::Value::Null
+                    }
                 }
             };
             if !params.is_null() {
-                if let Err(e) = self.conn.request("Browser.setUserAgentOverride", params).await {
+                if let Err(e) = self
+                    .conn
+                    .request("Browser.setUserAgentOverride", params)
+                    .await
+                {
                     push_err(&mut errors, "user_agent", e);
                 } else {
                     applied.push("user_agent".into());
@@ -2865,11 +2893,18 @@ impl PageHandle for CamoufoxPage {
             } else {
                 match v.as_str() {
                     Some(s) => serde_json::json!({ "timezoneId": s }),
-                    None => { errors.push("timezone: need string or null".into()); serde_json::Value::Null }
+                    None => {
+                        errors.push("timezone: need string or null".into());
+                        serde_json::Value::Null
+                    }
                 }
             };
             if !params.is_null() {
-                if let Err(e) = self.conn.request("Browser.setTimezoneOverride", params).await {
+                if let Err(e) = self
+                    .conn
+                    .request("Browser.setTimezoneOverride", params)
+                    .await
+                {
                     push_err(&mut errors, "timezone", e);
                 } else {
                     applied.push("timezone".into());
@@ -2882,7 +2917,10 @@ impl PageHandle for CamoufoxPage {
             } else {
                 match v.as_str() {
                     Some(s) => serde_json::json!({ "locale": s }),
-                    None => { errors.push("locale: need string or null".into()); serde_json::Value::Null }
+                    None => {
+                        errors.push("locale: need string or null".into());
+                        serde_json::Value::Null
+                    }
                 }
             };
             if !params.is_null() {
@@ -2899,11 +2937,18 @@ impl PageHandle for CamoufoxPage {
             } else {
                 match v.as_str() {
                     Some(s) => serde_json::json!({ "platform": s }),
-                    None => { errors.push("platform: need string or null".into()); serde_json::Value::Null }
+                    None => {
+                        errors.push("platform: need string or null".into());
+                        serde_json::Value::Null
+                    }
                 }
             };
             if !params.is_null() {
-                if let Err(e) = self.conn.request("Browser.setPlatformOverride", params).await {
+                if let Err(e) = self
+                    .conn
+                    .request("Browser.setPlatformOverride", params)
+                    .await
+                {
                     push_err(&mut errors, "platform", e);
                 } else {
                     applied.push("platform".into());
@@ -2926,7 +2971,11 @@ impl PageHandle for CamoufoxPage {
                 serde_json::Value::Null
             };
             if !params.is_null() {
-                if let Err(e) = self.conn.request("Browser.setExtraHTTPHeaders", params).await {
+                if let Err(e) = self
+                    .conn
+                    .request("Browser.setExtraHTTPHeaders", params)
+                    .await
+                {
                     push_err(&mut errors, "headers", e);
                 } else {
                     applied.push("headers".into());
@@ -2940,12 +2989,21 @@ impl PageHandle for CamoufoxPage {
                 let u = v.get("username").and_then(|x| x.as_str());
                 let p = v.get("password").and_then(|x| x.as_str());
                 match (u, p) {
-                    (Some(u), Some(p)) => serde_json::json!({ "credentials": { "username": u, "password": p } }),
-                    _ => { errors.push("http_auth: need {username, password} or null".into()); serde_json::Value::Null }
+                    (Some(u), Some(p)) => {
+                        serde_json::json!({ "credentials": { "username": u, "password": p } })
+                    }
+                    _ => {
+                        errors.push("http_auth: need {username, password} or null".into());
+                        serde_json::Value::Null
+                    }
                 }
             };
             if !params.is_null() {
-                if let Err(e) = self.conn.request("Browser.setHTTPCredentials", params).await {
+                if let Err(e) = self
+                    .conn
+                    .request("Browser.setHTTPCredentials", params)
+                    .await
+                {
                     push_err(&mut errors, "http_auth", e);
                 } else {
                     applied.push("http_auth".into());

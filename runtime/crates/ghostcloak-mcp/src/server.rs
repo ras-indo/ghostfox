@@ -2886,7 +2886,10 @@ impl GhostcloakServer {
             insert("contrast", serde_json::json!(v));
         }
         if let Some(v) = args.viewport {
-            insert("viewport", serde_json::json!({ "width": v.width, "height": v.height }));
+            insert(
+                "viewport",
+                serde_json::json!({ "width": v.width, "height": v.height }),
+            );
         }
         if let Some(v) = args.online {
             insert("online", serde_json::json!(v));

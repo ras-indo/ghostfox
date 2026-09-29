@@ -1848,9 +1848,7 @@ impl PageHandle for CamoufoxPage {
                         Some(&sid),
                     )
                     .await
-                    .map_err(|e| {
-                        GhostError::PageOp(format!("insertText({k:?}) failed: {e}"))
-                    })?;
+                    .map_err(|e| GhostError::PageOp(format!("insertText({k:?}) failed: {e}")))?;
             }
             // Humanized cadence between keystrokes:
             //  - base 45-110ms per char (average typist)

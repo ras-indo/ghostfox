@@ -618,7 +618,7 @@ const MARKDOWN_JS: &str = r#"(()=>{
     if (t === 'UL') return '\n' + [...n.children].map(li =>
       '\n- ' + li.innerText.trim()).join('') + '\n';
     if (t === 'TABLE') {
-      const rows = [...t.rows].map(r => [...r.cells].map(
+      const rows = [...n.rows].map(r => [...r.cells].map(
         x => x.innerText.trim().replace(/\|/g, '\\|')));
       if (!rows.length) return '';
       const head = rows[0], body = rows.slice(1);
@@ -2120,7 +2120,7 @@ impl GhostcloakServer {
         // NOTE: synchronous XHR, not fetch — the Juggler Runtime.evaluate
         // scheme has no awaitPromise (async fetch would never resolve).
         let expr = format!(
-            "(()=>{{try{{const x=new XMLHttpRequest();x.open('{}',{url_json},false);x.withCredentials=true;const hd={headers_json};for(const k in hd){{try{{x.setRequestHeader(k,hd[k])}}catch(e)}};x.send({body_part_json});const rh={{}};const raw=x.getAllResponseHeaders()||'';for(const line of raw.trim().split(/\\r?\\n/)){{const i=line.indexOf(':');if(i>0)rh[line.slice(0,i).trim().toLowerCase()]=line.slice(i+1).trim();}}const t=x.responseText||'';return JSON.stringify({{status:x.status,ok:x.status>=200&&x.status<300,url:x.responseURL,headers:rh,body_len:t.length,body:t.slice(0,2000000)}});}}catch(e){{return JSON.stringify({{error:String(e)}})}}}})()",
+            "(()=>{{try{{const x=new XMLHttpRequest();x.open('{}',{url_json},false);x.withCredentials=true;const hd={headers_json};for(const k in hd){{x.setRequestHeader(k,hd[k]);}}x.send({body_part_json});const rh={{}};const raw=x.getAllResponseHeaders()||'';for(const line of raw.trim().split(/\\r?\\n/)){{const i=line.indexOf(':');if(i>0)rh[line.slice(0,i).trim().toLowerCase()]=line.slice(i+1).trim();}}const t=x.responseText||'';return JSON.stringify({{status:x.status,ok:x.status>=200&&x.status<300,url:x.responseURL,headers:rh,body_len:t.length,body:t.slice(0,2000000)}});}}catch(e){{return JSON.stringify({{error:String(e)}})}}}})()",
             js_escape(&method),
             body_part_json = match (&body, method.as_str()) {
                 (Some(b), m) if m != "GET" && m != "HEAD" => {

@@ -48,6 +48,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Execution-context recovery overhaul — `Failed to find execution
+  context with id = mainframe-N`** — the context pumps (startup, live,
+  popup) adopted a frame only by EQUALITY against a pinned
+  `main_frame_id`, so after a renderer crash / tab-recreate (the top
+  frame comes back with a NEW `mainframe-N`) every recovery event was
+  rejected forever and evaluate() kept retrying the dead id, eventually
+  leaking juggler's raw channel error. All three pumps now use the id
+  PREFIX rule (`mainframe-*` inside a session-filtered pump IS our top
+  frame), `Page.navigationCommitted` re-pins on any top-frame commit, and
+  the live pump gained `Browser.attachedToTarget` /
+  `Browser.detachedFromTarget` / `Inspector.targetCrashed` arms (session
+  self-heal for main pages + full id clear on detach/crash).
+  `evaluate()` itself is a bounded recovery ladder: fail fast with an
+  actionable message when the renderer is flagged crashed, on a stale
+  rejection drop ALL cached ids (a rejected id is proven dead — the old
+  bug of retrying a corpse frame id 4× is impossible now), re-issue
+  `Runtime.enable` once so juggler REPLAYS `executionContextCreated`
+  for live contexts (resync without needing a navigation), fall back to
+  the freshly pinned frame id, and finally return guidance
+  ("reopen with page_open") instead of raw channel noise. Hung-page
+  timeouts stop after two attempts instead of spinning for minutes.
 - **`browser_exec` same-document `goto_url` wedged the exec lock** — a
   fragment-only jump never recreates the execution context, so navigate()'s
   context clear left evaluate() churning (~30min of retries) and every

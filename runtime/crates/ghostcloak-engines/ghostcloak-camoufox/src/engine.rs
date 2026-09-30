@@ -9,6 +9,7 @@ use std::os::fd::AsRawFd;
 use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use ghostcloak_core::engine::{
@@ -399,7 +400,7 @@ impl CamoufoxEngine {
                             .pointer("/params/auxData/frameId")
                             .and_then(|v| v.as_str());
                         if let (Some(sid), Some(cx), Some(fid)) = (sid, cx, fid) {
-                            if fid.starts_with("mainframe") {
+                            if is_main_frame_id(fid) {
                                 engine_for_listener
                                     .contexts
                                     .lock()
@@ -492,6 +493,9 @@ impl CamoufoxEngine {
                                                 *handle2.session_id.lock().await =
                                                     Some(sid.to_string());
                                             }
+                                            // Fresh attach = fresh world: any
+                                            // previous crash flag is stale.
+                                            handle2.crashed.store(false, Ordering::SeqCst);
                                         }
                                     }
                                 }
@@ -502,6 +506,28 @@ impl CamoufoxEngine {
                                         if tid == handle2.target_id {
                                             *handle2.session_id.lock().await = None;
                                             *handle2.execution_context_id.lock().await = None;
+                                            // Frame ids die with the session —
+                                            // leaving them pinned made evaluate
+                                            // fall back to a corpse forever.
+                                            *handle2.frame_id.lock().await = None;
+                                            *handle2.main_frame_id.lock().await = None;
+                                        }
+                                    }
+                                }
+                                Some("Inspector.targetCrashed") => {
+                                    handle2.crashed.store(true, Ordering::SeqCst);
+                                    *handle2.execution_context_id.lock().await = None;
+                                    *handle2.frame_id.lock().await = None;
+                                    *handle2.main_frame_id.lock().await = None;
+                                }
+                                Some("Page.navigationCommitted") => {
+                                    if let Some(fid) =
+                                        msg.pointer("/params/frameId").and_then(|v| v.as_str())
+                                    {
+                                        if is_main_frame_id(fid) {
+                                            *handle2.main_frame_id.lock().await =
+                                                Some(fid.to_string());
+                                            *handle2.frame_id.lock().await = Some(fid.to_string());
                                         }
                                     }
                                 }
@@ -514,16 +540,12 @@ impl CamoufoxEngine {
                                             .pointer("/params/auxData/frameId")
                                             .and_then(|v| v.as_str())
                                             .map(str::to_string);
-                                        let mut main = handle2.main_frame_id.lock().await;
-                                        let is_main = match (main.clone(), fid.as_deref()) {
-                                            (Some(m), Some(f)) => m == f,
-                                            (None, Some(f)) => {
-                                                *main = Some(f.to_string());
-                                                true
-                                            }
-                                            _ => false,
-                                        };
+                                        let is_main = fid
+                                            .as_deref()
+                                            .map(is_main_frame_id)
+                                            .unwrap_or(false);
                                         if is_main {
+                                            *handle2.main_frame_id.lock().await = fid.clone();
                                             *handle2.execution_context_id.lock().await =
                                                 Some(cx.to_string());
                                             if let Some(f) = fid {
@@ -581,6 +603,45 @@ pub struct CamoufoxPage {
     main_frame_id: Mutex<Option<String>>,
     frame_id: Mutex<Option<String>>,
     execution_context_id: Mutex<Option<String>>,
+    /// Renderer death observed on this target (Inspector.targetCrashed):
+    /// evaluate() fails fast with an actionable message instead of spinning
+    /// ~30s against a context that will never come back.
+    crashed: AtomicBool,
+}
+
+/// Juggler frame ids: `mainframe-N` is a page's TOP frame, `subframe-N` an
+/// iframe. Inside a session-filtered pump, ANY `mainframe-*` event belongs to
+/// OUR top frame — even after a crash/tab-recreate mints a NEW `N`.
+/// Equality against a previously pinned id wedges the handle forever once
+/// that frame is replaced: evaluate() then keeps retrying the dead id and
+/// juggler throws `Failed to find execution context with id = mainframe-N`.
+fn is_main_frame_id(fid: &str) -> bool {
+    match fid.strip_prefix("mainframe-") {
+        Some(n) => !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod frame_id_tests {
+    use super::is_main_frame_id;
+
+    #[test]
+    fn top_frame_ids_are_main() {
+        assert!(is_main_frame_id("mainframe-11"));
+        assert!(is_main_frame_id("mainframe-1"));
+        assert!(is_main_frame_id("mainframe-1234567"));
+    }
+
+    #[test]
+    fn iframe_and_junk_ids_never_match() {
+        assert!(!is_main_frame_id("subframe-3"));
+        assert!(!is_main_frame_id(""));
+        assert!(!is_main_frame_id("mainframe-"));
+        assert!(!is_main_frame_id("mainframex"));
+        assert!(!is_main_frame_id("mainframe-11abc"));
+        assert!(!is_main_frame_id("iframe-1"));
+    }
 }
 
 use tokio::sync::Mutex;
@@ -594,6 +655,7 @@ impl CamoufoxPage {
             main_frame_id: Mutex::new(None),
             frame_id: Mutex::new(None),
             execution_context_id: Mutex::new(None),
+            crashed: AtomicBool::new(false),
         })
     }
 
@@ -739,20 +801,13 @@ impl Engine for CamoufoxEngine {
                                 .pointer("/params/auxData/frameId")
                                 .and_then(|v| v.as_str())
                                 .map(str::to_string);
-                            let mut main = handle.main_frame_id.lock().await;
-                            let is_main = match (main.clone(), fid.as_deref()) {
-                                (Some(m), Some(f)) => m == f,
-                                (None, Some(f)) => {
-                                    // First frame we ever see is the main one:
-                                    // a page cannot host an iframe before its
-                                    // main frame exists.
-                                    *main = Some(f.to_string());
-                                    true
-                                }
-                                _ => false,
-                            };
-                            drop(main);
+                            // Prefix rule (NOT equality against the pin):
+                            // a crash/tab-recreate mints a NEW mainframe-N —
+                            // the old pin rejected the recovery event forever
+                            // and evaluate() kept retrying the dead id.
+                            let is_main = fid.as_deref().map(is_main_frame_id).unwrap_or(false);
                             if is_main {
+                                *handle.main_frame_id.lock().await = fid.clone();
                                 *handle.frame_id.lock().await = fid;
                                 *handle.execution_context_id.lock().await = Some(cx.to_string());
                             }
@@ -760,18 +815,13 @@ impl Engine for CamoufoxEngine {
                     }
                     if method == Some("Page.navigationCommitted") {
                         if let Some(fid) = msg.pointer("/params/frameId").and_then(|v| v.as_str()) {
-                            let mut main = handle.main_frame_id.lock().await;
-                            match main.clone() {
-                                Some(m) if m == fid => {
-                                    drop(main);
-                                    *handle.frame_id.lock().await = Some(fid.to_string());
-                                }
-                                None => {
-                                    *main = Some(fid.to_string());
-                                    drop(main);
-                                    *handle.frame_id.lock().await = Some(fid.to_string());
-                                }
-                                _ => {}
+                            // Top frame of OUR session committed a navigation
+                            // (including a crash-recreate with a new id):
+                            // re-pin immediately so evaluate()'s frame fallback
+                            // never points at a dead frame.
+                            if is_main_frame_id(fid) {
+                                *handle.main_frame_id.lock().await = Some(fid.to_string());
+                                *handle.frame_id.lock().await = Some(fid.to_string());
                             }
                         }
                     }
@@ -857,22 +907,22 @@ impl Engine for CamoufoxEngine {
                                         // valid evaluate target; iframe srcdoc
                                         // contexts must not hijack it (e.g.
                                         // bot.sannysoft.com's trailing test
-                                        // iframes).
+                                        // iframes). The id PREFIX decides —
+                                        // NOT equality against the pinned id:
+                                        // after a crash/tab-recreate the top
+                                        // frame gets a NEW mainframe-N, and the
+                                        // old pin rejected that recovery event
+                                        // forever (evaluate kept retrying the
+                                        // dead id: "Failed to find execution
+                                        // context with id = mainframe-N").
                                         let fid = msg
                                             .pointer("/params/auxData/frameId")
                                             .and_then(|v| v.as_str())
                                             .map(str::to_string);
-                                        let mut main = handle2.main_frame_id.lock().await;
-                                        let is_main = match (main.clone(), fid.as_deref()) {
-                                            (Some(m), Some(f)) => m == f,
-                                            (None, Some(f)) => {
-                                                *main = Some(f.to_string());
-                                                true
-                                            }
-                                            _ => false,
-                                        };
-                                        drop(main);
+                                        let is_main =
+                                            fid.as_deref().map(is_main_frame_id).unwrap_or(false);
                                         if is_main {
+                                            *handle2.main_frame_id.lock().await = fid.clone();
                                             if let Some(f) = fid {
                                                 *handle2.frame_id.lock().await = Some(f);
                                             }
@@ -1074,18 +1124,9 @@ impl Engine for CamoufoxEngine {
                                 if let Some(fid) =
                                     msg.pointer("/params/frameId").and_then(|v| v.as_str())
                                 {
-                                    let mut main = handle2.main_frame_id.lock().await;
-                                    match main.clone() {
-                                        Some(m) if m == fid => {
-                                            drop(main);
-                                            *handle2.frame_id.lock().await = Some(fid.to_string());
-                                        }
-                                        None => {
-                                            *main = Some(fid.to_string());
-                                            drop(main);
-                                            *handle2.frame_id.lock().await = Some(fid.to_string());
-                                        }
-                                        _ => {}
+                                    if is_main_frame_id(fid) {
+                                        *handle2.main_frame_id.lock().await = Some(fid.to_string());
+                                        *handle2.frame_id.lock().await = Some(fid.to_string());
                                     }
                                 }
                             }
@@ -1107,7 +1148,26 @@ impl Engine for CamoufoxEngine {
                                     {
                                         *handle2.session_id.lock().await = Some(sid.to_string());
                                     }
+                                    handle2.crashed.store(false, Ordering::SeqCst);
                                 }
+                            }
+                            if method == Some("Browser.detachedFromTarget") {
+                                if let Some(tid) =
+                                    msg.pointer("/params/targetId").and_then(|v| v.as_str())
+                                {
+                                    if tid == handle2.target_id.as_str() {
+                                        *handle2.session_id.lock().await = None;
+                                        *handle2.execution_context_id.lock().await = None;
+                                        *handle2.frame_id.lock().await = None;
+                                        *handle2.main_frame_id.lock().await = None;
+                                    }
+                                }
+                            }
+                            if method == Some("Inspector.targetCrashed") {
+                                handle2.crashed.store(true, Ordering::SeqCst);
+                                *handle2.execution_context_id.lock().await = None;
+                                *handle2.frame_id.lock().await = None;
+                                *handle2.main_frame_id.lock().await = None;
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -3199,41 +3259,67 @@ impl PageHandle for CamoufoxPage {
     }
 
     async fn evaluate(&self, expression: &str) -> Result<serde_json::Value> {
-        // In Juggler, executionContextId is the "id-N" context id from
-        // Runtime.executionContextCreated — NOT the mainframe-N frame id.
-        // Contexts are recreated on navigation, so on a stale-id failure we
-        // wait briefly for the pump to report the new one and retry once.
-        for attempt in 0..4 {
-            // Wait (bounded) for the pump to report a live context after a
-            // navigation before firing the evaluate.
-            let ctx = {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-                loop {
-                    let ctx = self.execution_context().await.ok();
-                    if ctx.is_some() || std::time::Instant::now() > deadline {
-                        // Juggler also accepts the FRAME id ("mainframe-N")
-                        // as the executionContextId — it resolves the
-                        // frame's default context itself. Fall back to it
-                        // when the "id-N" context never materializes (e.g.
-                        // after insertText churn with no fresh event).
-                        if ctx.is_some() {
-                            break ctx;
-                        }
-                        break self.frame_id.lock().await.clone();
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        // Juggler's executionContextId ("id-N") dies on navigation and is
+        // RE-MINTED after a crash/tab-recreate — and so is the frame id
+        // ("mainframe-N"). The old ladder cleared ONLY the context id and
+        // retried the possibly-dead frame id, so juggler eventually threw
+        // "Failed to find execution context with id = mainframe-N" straight
+        // at the caller. Recovery ladder (bounded):
+        //   0) fail fast with an actionable message when the renderer died;
+        //   1) use the cached context id (fast path);
+        //   2) on a stale rejection, drop ALL cached ids (a rejected id is
+        //      proven dead — no retry may reuse that corpse), let the pump
+        //      re-pin the next mainframe-* event, and re-issue Runtime.enable
+        //      ONCE so juggler REPLAYS executionContextCreated for whatever
+        //      context is actually alive — resync without a navigation;
+        //   3) fall back to the (freshly pinned) frame id;
+        //   4) give up with guidance instead of raw channel noise.
+        let mut recovery_issued = false;
+        let mut timeouts = 0u32;
+        let mut last_error = String::from("no execution context");
+        for attempt in 0..6 {
+            if self.crashed.load(Ordering::SeqCst) {
+                return Err(GhostError::PageOp(
+                    "renderer crashed: the page's execution context is gone — \
+                     reopen the page with page_open",
+                ));
+            }
+            // Wait (bounded) for the pump to (re)establish a live context.
+            let wait_ms: u64 = if attempt == 0 { 2000 } else { 2500 };
+            let started = std::time::Instant::now();
+            let ctx = loop {
+                if let Ok(ctx) = self.execution_context().await {
+                    break Some(ctx);
                 }
+                if started.elapsed().as_millis() as u64 >= wait_ms {
+                    break None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             };
+            // Empty cache right after a clear: use the (freshly pinned) main
+            // frame id — juggler resolves the frame's default context itself.
             let ctx = match ctx {
                 Some(c) => c,
-                None => {
-                    if attempt == 3 {
-                        return Err(GhostError::PageOp("no execution context".into()));
+                None => match self.frame_id.lock().await.clone() {
+                    Some(f) => f,
+                    None => {
+                        if attempt == 5 {
+                            break;
+                        }
+                        last_error = "no execution context and no frame id".into();
+                        continue;
                     }
-                    continue;
+                },
+            };
+            let sid = match self.session_id().await {
+                Ok(s) => s,
+                Err(_) => {
+                    return Err(GhostError::PageOp(
+                        "target session detached (page closed or renderer died) — \
+                         reopen the page with page_open",
+                    ));
                 }
             };
-            let sid = self.session_id().await?;
             tracing::debug!(target: "ghostcloak::camoufox", "evaluate attempt {attempt} ctx={ctx} sid={sid}");
             let result = match self
                 .conn
@@ -3249,16 +3335,55 @@ impl PageHandle for CamoufoxPage {
                 .await
             {
                 Ok(r) => r,
-                Err(error) if attempt < 3 => {
-                    // Stale context (mid-navigation): clear the cached id so
-                    // the next attempt waits for the pump to report the
-                    // replacement instead of reusing the dead one.
+                Err(error) if attempt < 5 => {
+                    let msg = error.to_string();
+                    last_error = msg.clone();
+                    let timeoutish = msg.contains("timed out") || msg.contains("timeout");
+                    if timeoutish {
+                        timeouts += 1;
+                        // A page that stays busy past one full retry is hung,
+                        // not racing a context swap — don't spin for minutes.
+                        if timeouts >= 2 {
+                            return Err(GhostError::PageOp(format!(
+                                "evaluate timed out (page busy or hung): {msg}"
+                            )));
+                        }
+                    }
+                    // Drop EVERY cached id: a rejected id is proven dead, and
+                    // the old bug (retrying a dead frame id four times) must
+                    // be impossible now.
                     *self.execution_context_id.lock().await = None;
-                    tracing::debug!(target: "ghostcloak::camoufox", "evaluate ctx stale ({error}); cleared cache, retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    *self.frame_id.lock().await = None;
+                    *self.main_frame_id.lock().await = None;
+                    tracing::debug!(target: "ghostcloak::camoufox", "evaluate stale ({msg}); all ids cleared, recovering");
+                    if !recovery_issued {
+                        recovery_issued = true;
+                        // Runtime.enable is idempotent; juggler replays
+                        // executionContextCreated for live contexts, which is
+                        // how we resync when the original event was missed.
+                        if let Err(e) = self
+                            .conn
+                            .request_session(
+                                "Runtime.enable",
+                                serde_json::json!({}),
+                                Some(&sid),
+                            )
+                            .await
+                        {
+                            tracing::debug!(target: "ghostcloak::camoufox", "Runtime.enable recovery failed: {e}");
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        400 + attempt * 300,
+                    ))
+                    .await;
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    return Err(GhostError::PageOp(format!(
+                        "evaluate failed after recovery: {e}"
+                    )));
+                }
             };
             if let Some(exc) = result.get("exceptionDetails") {
                 return Err(GhostError::PageOp(format!(
@@ -3270,7 +3395,7 @@ impl PageHandle for CamoufoxPage {
                 .pointer("/result/value")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            if value.is_null() && attempt < 3 {
+            if value.is_null() && attempt < 5 {
                 // A null return on a stale context is indistinguishable from
                 // a legitimately-null expression. Nudge: on the next attempt
                 // try the frame id directly — Juggler resolves the frame's
@@ -3290,9 +3415,10 @@ impl PageHandle for CamoufoxPage {
             tracing::debug!(target: "ghostcloak::camoufox", "evaluate done attempt {attempt}: {value:?}");
             return Ok(value);
         }
-        Err(GhostError::PageOp(
-            "evaluate: context never became ready".into(),
-        ))
+        Err(GhostError::PageOp(format!(
+            "execution context unavailable after recovery ({last_error}); \
+             the page may have reloaded or crashed — reopen it with page_open"
+        )))
     }
 
     async fn url(&self) -> Result<String> {

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`page_screenshot` returns the image INLINE** — response is now
+  `[text JSON metadata, image content block]` (mobile-mcp
+  `mobile_take_screenshot` parity): the calling client SEES the screenshot
+  directly instead of only receiving a file path. Metadata gains
+  `width`/`height` and `inline`; when `max_dim` scaled the capture, a
+  `coordinate_mapping` hint (screenshot→page multiply factor) is included so
+  the client can map what it sees back to page pixels. Inline gracefully
+  skipped above 4 MiB with an `inline_skipped` shrink hint (`max_dim` /
+  `format=jpeg`) so a huge full-page capture can never blow the MCP message
+  cap.
 - **`page_click` variants** — `button: "right"` (contextmenu) and
   `click_count: 2` (double-click) with REAL engine mouse events on Camoufox
   (isTrusted; ~90ms human gap between double-clicks), DOM-dispatch fallback

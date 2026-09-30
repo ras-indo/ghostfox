@@ -5876,7 +5876,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Capture a PNG screenshot of a page (viewport by default, full page with full_page=true). Saved under the session recordings dir; returns the file path. Feeds the live view when enabled."
+        description = "Capture a screenshot of a page (viewport by default, full page with full_page=true) and SEE it directly: returns [text JSON metadata, image content block] — the image goes to you inline (mobile_take_screenshot parity), plus the saved file path under the session recordings dir. Use max_dim (e.g. 1600) and format=jpeg for smaller payloads; inline is skipped (>4 MiB) with a shrink hint in the text. Feeds the live view when enabled."
     )]
     async fn page_screenshot(
         &self,
@@ -5903,6 +5903,9 @@ impl GhostcloakServer {
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         let orig_bytes = png.len();
         // Optional post-process (from chrome-devtools/browser-use): downscale + re-encode.
+        // Track source dims so we can hand the client a coordinate mapping when scaled.
+        let mut scaled_from: Option<(u32, u32)> = None;
+        let mut final_dims: (u32, u32) = (0, 0);
         let fmt = format.as_deref().unwrap_or("png").to_ascii_lowercase();
         if fmt != "png" && fmt != "jpeg" && fmt != "jpg" {
             return Err(rmcp::model::ErrorData::invalid_params(
@@ -5913,6 +5916,7 @@ impl GhostcloakServer {
         if max_dim.is_some() || fmt == "jpeg" || fmt == "jpg" {
             let img = image::load_from_memory(&png)
                 .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            let (src_w, src_h) = (img.width(), img.height());
             let img = match max_dim {
                 Some(md) if md >= 16 => {
                     let (w, h) = (img.width(), img.height());
@@ -5937,6 +5941,10 @@ impl GhostcloakServer {
                 img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
                     .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
             }
+            if (img.width(), img.height()) != (src_w, src_h) {
+                scaled_from = Some((src_w, src_h));
+            }
+            final_dims = (img.width(), img.height());
             png = buf;
         }
         let path = self
@@ -5944,16 +5952,63 @@ impl GhostcloakServer {
             .record_screenshot(&session_id, &page_id, &png)
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         let url = settled_url(&page).await;
+        // No post-process path: engine emitted a raw PNG — IHDR holds the dims
+        // (width = BE u32 @16, height = BE u32 @20) without decoding pixels.
+        if final_dims == (0, 0) && png.len() >= 24 && png[0] == 0x89 && png[1] == 0x50 {
+            final_dims = (
+                u32::from_be_bytes([png[16], png[17], png[18], png[19]]),
+                u32::from_be_bytes([png[20], png[21], png[22], png[23]]),
+            );
+        }
+        // Inline image content (mobile_take_screenshot parity): hand the
+        // screenshot to the calling client directly as an MCP image block so it
+        // can SEE the page instead of only receiving a file path. Graceful
+        // skip above 4 MiB (typical MCP/LLM message cap) — shrink via
+        // max_dim / format=jpeg instead.
+        use base64::Engine as _;
+        const INLINE_MAX_BYTES: usize = 4 * 1024 * 1024;
+        let mime = if fmt == "jpeg" || fmt == "jpg" {
+            "image/jpeg"
+        } else {
+            "image/png"
+        };
+        let inline_b64 = (png.len() <= INLINE_MAX_BYTES)
+            .then(|| base64::engine::general_purpose::STANDARD.encode(&png));
+        let mut json = serde_json::json!({
+            "file": path.to_string_lossy(),
+            "bytes": std::path::Path::new(&path).metadata().map(|m| m.len()).unwrap_or_default(),
+            "original_bytes": orig_bytes,
+            "format": if fmt == "jpg" { "jpeg" } else { fmt.as_str() },
+            "width": final_dims.0,
+            "height": final_dims.1,
+            "inline": inline_b64.is_some(),
+        });
+        if let Some((src_w, src_h)) = scaled_from {
+            let rx = src_w as f64 / final_dims.0 as f64;
+            let ry = src_h as f64 / final_dims.1 as f64;
+            json["coordinate_mapping"] = format!(
+                "Screenshot is {}x{} (scaled from {}x{}). To map screenshot coordinates to \
+                 page pixels, multiply x by {:.3} and y by {:.3}.",
+                final_dims.0, final_dims.1, src_w, src_h, rx, ry
+            )
+            .into();
+        }
+        if inline_b64.is_none() {
+            json["inline_skipped"] = format!(
+                "screenshot is {} bytes (> 4 MiB inline cap) — pass max_dim (e.g. 1600) \
+                 or format=jpeg to shrink it",
+                png.len()
+            )
+            .into();
+        }
         crate::liveview::update(&session_id, &page_id, &url, png);
-        Ok(text_result(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "file": path.to_string_lossy(),
-                "bytes": std::path::Path::new(&path).metadata().map(|m| m.len()).unwrap_or_default(),
-                "original_bytes": orig_bytes,
-                "format": if fmt == "jpg" { "jpeg" } else { fmt.as_str() },
-            }))
-            .unwrap_or_default(),
-        ))
+        let mut content = vec![rmcp::model::Content::text(
+            serde_json::to_string_pretty(&json).unwrap_or_default(),
+        )];
+        if let Some(b64) = inline_b64 {
+            content.push(rmcp::model::Content::image(b64, mime));
+        }
+        Ok(CallToolResult::success(content))
     }
 
     #[tool(

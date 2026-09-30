@@ -261,6 +261,17 @@ pub trait PageHandle: Send + Sync {
             "drag_ref not supported by this engine".into(),
         ))
     }
+    /// Safety cleanup: release the mouse button at (x, y) after a
+    /// cancelled humanized drag (timeout dropped the future between
+    /// mousedown and mouseup — a stuck-pressed button wedges the whole
+    /// session). Engines with real mouse dispatch override this;
+    /// the default is a no-op error so callers treat it as best-effort.
+    async fn release_mouse_at(&self, x: f64, y: f64) -> Result<()> {
+        let _ = (x, y);
+        Err(crate::error::GhostError::PageOp(
+            "release_mouse_at not supported by this engine".into(),
+        ))
+    }
     /// v0.6.3: Register a script that runs at DOCUMENT START on every
     /// navigation — before any page script. The deepest hook layer.
     async fn add_init_script(&self, source: &str) -> Result<()> {

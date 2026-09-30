@@ -61,6 +61,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text through into the sanitized `name`/`value`; `visibleText` now walks
   `parentElement` to the root (font-size/visibility already resolve via
   computed inheritance, `aria-hidden` already used `closest()`).
+- **`page_a11y` sanitization: offscreen plants stripped** (post-review) —
+  text fully outside the document (`top:-9999px`, `left:-9999px`) or in a
+  zero-size box is invisible to a human but innerText still counted it;
+  `visibleText` now checks the parent's bounding rect against the
+  document scroll size (residual: `clip-path`/`clip` masking not detected).
+- **`page_open` DOM wait bounded** (post-review, pre-existing) — the
+  inline 60×250ms `!!document.body` loop had no overall deadline (same
+  wedge class as `wait_for_dom`); it now reuses `wait_for_dom` (12s).
+- **Cancelled click now releases the button** (post-review) — the 30s
+  `click_at_xy` timeout drops the `drag_ref` future between mousedown and
+  mouseup, and that future can no longer run its internal `force_release`;
+  a stuck-pressed button wedges the whole Juggler session. New
+  `PageHandle::release_mouse_at(x, y)` (default: unsupported error;
+  Camoufox: retrying `force_release`) is called best-effort (5s cap)
+  on the timeout path.
 
 ### Changed
 

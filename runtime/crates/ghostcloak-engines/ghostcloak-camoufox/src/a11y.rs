@@ -41,11 +41,19 @@ pub(crate) const WALK_JS: &str = r#"(
     // (innerText already skips display:none, but NOT the other four.)
     function visibleText(el) {
       var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      // A human can only scroll within the document: text planted fully
+      // outside it (top:-9999px / left:-9999px tricks) or in a zero-size
+      // box is invisible even though innerText still counts it.
+      var doc = document.documentElement;
+      var docW = doc.scrollWidth, docH = doc.scrollHeight;
       var parts = [], node;
       while ((node = walker.nextNode())) {
         var p = node.parentElement;
         if (!p || !node.nodeValue || !node.nodeValue.trim()) continue;
         if (p.closest('[aria-hidden="true"]')) continue;
+        var r = p.getBoundingClientRect();
+        if (r.width < 1 && r.height < 1) continue;
+        if (r.bottom < 0 || r.right < 0 || r.top > docH || r.left > docW) continue;
         var s = getComputedStyle(p);
         if (s.display === 'none' || s.visibility === 'hidden') continue;
         if (parseFloat(s.fontSize) === 0) continue;

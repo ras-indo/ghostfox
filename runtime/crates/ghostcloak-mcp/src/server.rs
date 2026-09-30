@@ -1693,12 +1693,10 @@ impl GhostcloakServer {
         // "document.body is null" on slower loads.
         if !new_id.is_empty() {
             if let Ok(page) = session.page(&new_id).await {
-                for _ in 0..60 {
-                    match page.evaluate("!!document.body").await {
-                        Ok(v) if v.as_bool() == Some(true) => break,
-                        _ => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
-                    }
-                }
+                // Shared bounded DOM wait (12s overall deadline) — the old
+                // inline 60×250ms loop had no deadline, so a dead context
+                // could burn minutes here (same class as wait_for_dom).
+                wait_for_dom(&page).await;
                 // Default dialog policy: accept everything — a bare alert()
                 // otherwise wedges every subsequent eval on this page.
                 // Best-effort: never fail the open over the dialog handler.
@@ -5803,10 +5801,34 @@ impl GhostcloakServer {
                                 "op": "click", "x": x, "y": y, "ok": false,
                                 "error": e.to_string(),
                             })),
-                            Err(_) => actions.push(serde_json::json!({
-                                "op": "click", "x": x, "y": y, "ok": false,
-                                "error": "click timed out after 30s",
-                            })),
+                            Err(_) => {
+                                // The cancelled drag future never reaches
+                                // drag_ref's internal force_release — a
+                                // mousedown without mouseup wedges the whole
+                                // Juggler session (all later mouse dispatches
+                                // time out). Best-effort release at the press
+                                // point, hard-capped.
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    page.release_mouse_at(x, y),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => tracing::warn!(
+                                        target: "ghostcloak::mcp",
+                                        "browser_exec click timed out; button release failed: {e}"
+                                    ),
+                                    Err(_) => tracing::warn!(
+                                        target: "ghostcloak::mcp",
+                                        "browser_exec click timed out; button release timed out"
+                                    ),
+                                }
+                                actions.push(serde_json::json!({
+                                    "op": "click", "x": x, "y": y, "ok": false,
+                                    "error": "click timed out after 30s (button release attempted)",
+                                }));
+                            }
                         }
                     }
                     "wait" => {

@@ -2210,6 +2210,14 @@ impl PageHandle for CamoufoxPage {
         Ok(())
     }
 
+    /// Trait-facing safety release (PageHandle::release_mouse_at): reuses
+    /// the retrying force_release so a drag future cancelled by an
+    /// external timeout cannot leave the Juggler session button-stuck.
+    async fn release_mouse_at(&self, x: f64, y: f64) -> Result<()> {
+        self.force_release(x, y).await;
+        Ok(())
+    }
+
     async fn add_init_script(&self, source: &str) -> Result<()> {
         CamoufoxPage::add_init_script(self, source).await
     }

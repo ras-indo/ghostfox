@@ -671,7 +671,10 @@ mod same_document_tests {
             "http://127.0.0.1:8899/ctxnav.html?x=1",
             "http://127.0.0.1:8899/ctxnav.html?x=2"
         ));
-        assert!(!same_document("http://127.0.0.1:8899/a.html", "about:blank"));
+        assert!(!same_document(
+            "http://127.0.0.1:8899/a.html",
+            "about:blank"
+        ));
     }
 
     #[test]

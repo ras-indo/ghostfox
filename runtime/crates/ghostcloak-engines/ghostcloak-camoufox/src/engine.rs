@@ -8,8 +8,8 @@ use std::os::fd::AsRawFd;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ghostcloak_core::engine::{
@@ -540,10 +540,8 @@ impl CamoufoxEngine {
                                             .pointer("/params/auxData/frameId")
                                             .and_then(|v| v.as_str())
                                             .map(str::to_string);
-                                        let is_main = fid
-                                            .as_deref()
-                                            .map(is_main_frame_id)
-                                            .unwrap_or(false);
+                                        let is_main =
+                                            fid.as_deref().map(is_main_frame_id).unwrap_or(false);
                                         if is_main {
                                             *handle2.main_frame_id.lock().await = fid.clone();
                                             *handle2.execution_context_id.lock().await =
@@ -3363,20 +3361,13 @@ impl PageHandle for CamoufoxPage {
                         // how we resync when the original event was missed.
                         if let Err(e) = self
                             .conn
-                            .request_session(
-                                "Runtime.enable",
-                                serde_json::json!({}),
-                                Some(&sid),
-                            )
+                            .request_session("Runtime.enable", serde_json::json!({}), Some(&sid))
                             .await
                         {
                             tracing::debug!(target: "ghostcloak::camoufox", "Runtime.enable recovery failed: {e}");
                         }
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        400 + attempt * 300,
-                    ))
-                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(400 + attempt * 300)).await;
                     continue;
                 }
                 Err(e) => {

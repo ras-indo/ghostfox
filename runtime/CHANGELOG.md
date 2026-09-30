@@ -68,11 +68,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survives to anchor the fallback); busy-page timeouts never touch the
   pins (same-document navigations emit no replacement events, so clearing
   there would starve the retry loop) and stop after two attempts instead
-  of spinning for minutes; re-issue `Runtime.enable` once so juggler
-  REPLAYS `executionContextCreated` for live contexts (resync without a
-  navigation), fall back to the freshly pinned frame id, and finally
-  return guidance ("reopen with page_open") instead of raw channel
-  noise.
+  of spinning for minutes; with BOTH pins empty, evaluate with NO
+  `executionContextId` — juggler's default context exists whenever the
+  session does, so recovery needs NO event at all (this covers event-storm
+  losses: the juggler broadcast channel grew 256 → 4096 because a Lagged
+  overflow silently dropped `executionContextCreated` and left the handle
+  pinned to nothing). Falls back to the freshly pinned frame id, and
+  finally returns guidance ("reopen with page_open") instead of raw
+  channel noise.
 - **`browser_exec` same-document `goto_url` wedged the exec lock** — a
   fragment-only jump never recreates the execution context, so navigate()'s
   context clear left evaluate() churning (~30min of retries) and every

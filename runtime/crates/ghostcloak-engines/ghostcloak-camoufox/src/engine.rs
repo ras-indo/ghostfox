@@ -3262,17 +3262,18 @@ impl PageHandle for CamoufoxPage {
         // ("mainframe-N"). The old ladder cleared ONLY the context id and
         // retried the possibly-dead frame id, so juggler eventually threw
         // "Failed to find execution context with id = mainframe-N" straight
-        // at the caller. Recovery ladder (bounded):
+        // at the caller. Recovery ladder (bounded ~12s):
         //   0) fail fast with an actionable message when the renderer died;
         //   1) use the cached context id (fast path);
-        //   2) on a stale rejection, drop ALL cached ids (a rejected id is
-        //      proven dead — no retry may reuse that corpse), let the pump
-        //      re-pin the next mainframe-* event, and re-issue Runtime.enable
-        //      ONCE so juggler REPLAYS executionContextCreated for whatever
-        //      context is actually alive — resync without a navigation;
-        //   3) fall back to the (freshly pinned) frame id;
+        //   2) on a stale rejection, drop exactly what was rejected — the
+        //      context pin for a rejected "id-N", the frame pins TOO when
+        //      the frame id itself was the rejected target (proven dead;
+        //      the next mainframe-* event re-pins by prefix rule);
+        //   3) with BOTH pins empty, evaluate with NO executionContextId:
+        //      juggler's default context exists whenever the session does —
+        //      recovery that needs NO event at all, covering event-storm
+        //      losses (broadcast Lagged drops executionContextCreated);
         //   4) give up with guidance instead of raw channel noise.
-        let mut recovery_issued = false;
         let mut timeouts = 0u32;
         let mut last_error = String::from("no execution context");
         for attempt in 0..6 {
@@ -3283,31 +3284,33 @@ impl PageHandle for CamoufoxPage {
                         .into(),
                 ));
             }
-            // Wait (bounded) for the pump to (re)establish a live context.
-            let wait_ms: u64 = if attempt == 0 { 2000 } else { 2500 };
-            let started = std::time::Instant::now();
-            let ctx = loop {
-                if let Ok(ctx) = self.execution_context().await {
-                    break Some(ctx);
-                }
-                if started.elapsed().as_millis() as u64 >= wait_ms {
-                    break None;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            };
-            // Empty cache right after a clear: use the (freshly pinned) main
-            // frame id — juggler resolves the frame's default context itself.
-            let ctx = match ctx {
-                Some(c) => c,
-                None => match self.frame_id.lock().await.clone() {
-                    Some(f) => f,
-                    None => {
-                        if attempt == 5 {
-                            break;
+            // Cached context id first (fast path). On a miss, give the pump
+            // a short window to (re)adopt a live context event before we
+            // fall back — a fresh pin usually lands within one event tick.
+            let cached = match self.execution_context().await {
+                Ok(c) => Some(c),
+                Err(_) => {
+                    let wait_ms: u64 = if attempt == 0 { 400 } else { 1500 };
+                    let started = std::time::Instant::now();
+                    loop {
+                        if let Ok(c) = self.execution_context().await {
+                            break Some(c);
                         }
-                        last_error = "no execution context and no frame id".into();
-                        continue;
+                        if started.elapsed().as_millis() as u64 >= wait_ms {
+                            break None;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                     }
+                }
+            };
+            // What we will send: cached context id, else the pinned main
+            // frame id (juggler resolves a frame's context from its id),
+            // else NOTHING — juggler's default context (no executionContextId).
+            let (target, sent_frame) = match cached {
+                Some(c) => (Some(c), false),
+                None => match self.frame_id.lock().await.clone() {
+                    Some(f) => (Some(f), true),
+                    None => (None, false),
                 },
             };
             let sid = match self.session_id().await {
@@ -3320,18 +3323,21 @@ impl PageHandle for CamoufoxPage {
                     ));
                 }
             };
-            tracing::debug!(target: "ghostcloak::camoufox", "evaluate attempt {attempt} ctx={ctx} sid={sid}");
+            tracing::debug!(target: "ghostcloak::camoufox", "evaluate attempt {attempt} ctx={target:?} sid={sid}");
+            let params = match &target {
+                Some(id) => serde_json::json!({
+                    "expression": expression,
+                    "executionContextId": id,
+                    "returnByValue": true,
+                }),
+                None => serde_json::json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                }),
+            };
             let result = match self
                 .conn
-                .request_session(
-                    "Runtime.evaluate",
-                    serde_json::json!({
-                        "expression": expression,
-                        "executionContextId": ctx,
-                        "returnByValue": true,
-                    }),
-                    Some(&sid),
-                )
+                .request_session("Runtime.evaluate", params, Some(&sid))
                 .await
             {
                 Ok(r) => r,
@@ -3351,42 +3357,32 @@ impl PageHandle for CamoufoxPage {
                         // Busy page ≠ dead ids: keep the pins (a same-document
                         // navigation emits NO replacement events, so a clear
                         // here would starve the retry loop forever).
-                    } else if !(msg.contains("context") || msg.contains("cannot find session")) {
+                    } else if msg.contains("cannot find session") {
+                        // The session itself is gone (target closed or the
+                        // renderer died): no retry can help — drop it cleanly
+                        // and say so in terms the caller can act on.
+                        *self.session_id.lock().await = None;
+                        return Err(GhostError::PageOp(
+                            "target session detached (page closed or renderer died) — \
+                             reopen the page with page_open"
+                                .into(),
+                        ));
+                    } else if !msg.contains("context") {
                         // Not a stale-id rejection — don't punish the ids.
                         return Err(GhostError::PageOp(format!("evaluate failed: {msg}")));
                     } else {
-                        // We just sent THIS id and juggler rejected it. If it
-                        // was the frame id (context cache was empty → frame
-                        // fallback), the frame itself is proven dead — drop
-                        // the pins so the next mainframe-* event (prefix rule)
-                        // re-pins a fresh one. A rejected "id-N" only
-                        // invalidates the context.
-                        let sent_frame =
-                            self.frame_id.lock().await.as_deref() == Some(ctx.as_str());
+                        // We just sent THIS target and juggler rejected it.
+                        // Context id → only the context pin dies. Frame id →
+                        // the frame itself is proven dead: drop every pin so
+                        // the next mainframe-* event (prefix rule) re-pins a
+                        // fresh one. An omitted (default-context) rejection
+                        // means the pins were already empty — nothing to clear.
                         *self.execution_context_id.lock().await = None;
                         if sent_frame {
                             *self.frame_id.lock().await = None;
                             *self.main_frame_id.lock().await = None;
                         }
                         tracing::debug!(target: "ghostcloak::camoufox", "evaluate stale ({msg}); sent_frame={sent_frame}, recovering");
-                        if !recovery_issued {
-                            recovery_issued = true;
-                            // Runtime.enable is idempotent; juggler replays
-                            // executionContextCreated for live contexts, which
-                            // is how we resync when the original event was
-                            // missed.
-                            if let Err(e) = self
-                                .conn
-                                .request_session(
-                                    "Runtime.enable",
-                                    serde_json::json!({}),
-                                    Some(&sid),
-                                )
-                                .await
-                            {
-                                tracing::debug!(target: "ghostcloak::camoufox", "Runtime.enable recovery failed: {e}");
-                            }
-                        }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(400 + attempt * 300)).await;
                     continue;

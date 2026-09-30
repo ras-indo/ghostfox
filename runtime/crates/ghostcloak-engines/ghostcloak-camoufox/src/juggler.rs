@@ -85,7 +85,10 @@ impl JugglerConnection {
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let (events, _) = tokio::sync::broadcast::channel::<serde_json::Value>(256);
+        // 4096: an a11y/meta-refresh storm bursts past 256 events quickly, and a
+        // Lagged overflow DROPS executionContextCreated — leaves page handles
+        // without a context pin forever (evaluate then had to recover blind).
+        let (events, _) = tokio::sync::broadcast::channel::<serde_json::Value>(4096);
         let events_tx = events.clone();
 
         let closed = Arc::new(tokio::sync::Notify::new());

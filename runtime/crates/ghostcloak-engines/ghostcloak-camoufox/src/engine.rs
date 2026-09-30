@@ -3277,10 +3277,10 @@ impl PageHandle for CamoufoxPage {
         let mut last_error = String::from("no execution context");
         for attempt in 0..6 {
             if self.crashed.load(Ordering::SeqCst) {
-                return Err(GhostError::PageOp(
+                return Err(GhostError::PageOp(format!(
                     "renderer crashed: the page's execution context is gone — \
-                     reopen the page with page_open",
-                ));
+                     reopen the page with page_open"
+                )));
             }
             // Wait (bounded) for the pump to (re)establish a live context.
             let wait_ms: u64 = if attempt == 0 { 2000 } else { 2500 };
@@ -3312,10 +3312,10 @@ impl PageHandle for CamoufoxPage {
             let sid = match self.session_id().await {
                 Ok(s) => s,
                 Err(_) => {
-                    return Err(GhostError::PageOp(
+                    return Err(GhostError::PageOp(format!(
                         "target session detached (page closed or renderer died) — \
-                         reopen the page with page_open",
-                    ));
+                         reopen the page with page_open"
+                    )));
                 }
             };
             tracing::debug!(target: "ghostcloak::camoufox", "evaluate attempt {attempt} ctx={ctx} sid={sid}");

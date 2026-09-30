@@ -14,6 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (isTrusted; ~90ms human gap between double-clicks), DOM-dispatch fallback
   for form controls / other engines via the new `PageHandle::click_variant`
   trait method (default impl = portable JS dispatch).
+- **`browser_exec`** — browser-use-style escape hatch: run a multi-statement
+  JS program in the page with `print()`/console capture, pre-imported
+  helpers (`page_info`, `$`/`$$`, `js`, `type_text`, `list_tabs`), and
+  QUEUED engine actions (`goto_url`, `new_tab`, `click_at_xy` with real
+  mouse, `wait_for_load`) executed after the script returns — inspect-then-
+  act in one call. Server-side `ns` scratch object persists across calls
+  and navigation (64KB cap, `reset_ns` to clear); calls are serialized by
+  an exec lock; errors return as tracebacks without failing the call;
+  20s hard timeout.
+- **`page_wait_for_text`** — wait until a string appears in visible body
+  text + title (browser-use `wait_for(text)` mode), case-insensitive by
+  default, 200ms poll, returns `{found, waited_ms}` — the content-based
+  counterpart to `page_wait_for` (selector-based).
 
 ## [0.8.0] — 2026-09-27
 

@@ -847,11 +847,18 @@ struct EmulateParams {
 pub struct GhostcloakServer {
     state: Arc<tokio::sync::RwLock<ServerState>>,
     recorder: crate::recording::Recorder,
+    /// browser_exec lock: the ns namespace is read-modify-write across an
+    /// await, so concurrent calls must serialize (browser-use exec lock).
+    exec_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
 pub(crate) struct ServerState {
     pub(crate) sessions: HashMap<String, Arc<Session>>,
+    /// browser_exec scratch namespaces, keyed by session_id — stored
+    /// server-side so state survives page navigation (a page-global would
+    /// be wiped on goto_url).
+    pub(crate) exec_ns: HashMap<String, serde_json::Value>,
 }
 
 impl GhostcloakServer {
@@ -1376,6 +1383,75 @@ const ANTIBOT_JS: &str = r#"(()=>{
     screen: screen.width + 'x' + screen.height + '@' + (window.devicePixelRatio || 1),
     timezone: (Intl.DateTimeFormat().resolvedOptions() || {}).timeZone || null,
     platform: navigator.platform, languages: navigator.languages };
+})()"#;
+
+/// browser_exec harness: runs a user program with browser-use-style helpers
+/// pre-imported, captures print()/console output, keeps a server-side `ns`
+/// scratch object, and queues engine-level actions (goto/new_tab/click/wait)
+/// that Rust executes after the script returns — navigation from inside an
+/// eval would destroy the very context we're reading results from.
+/// `@@NS@@`/`@@TABS@@`/`@@CODE@@` are replaced with JSON payloads in which
+/// every `@` is written as a JSON escape sequence, so user data can never
+/// forge a placeholder that would splice extra JS into the program.
+const BROWSEREXEC_JS: &str = r#"(()=>{
+  const out = [];
+  const fmt = v => { try { return typeof v === 'string' ? v : JSON.stringify(v); } catch (e) { return String(v); } };
+  const print = (...a) => { out.push(a.map(fmt).join(' ')); };
+  const log = print;
+  const ns = @@NS@@;
+  const tabs = @@TABS@@;
+  const acts = [];
+  const page_info = () => ({ url: location.href, title: document.title,
+    ready: document.readyState, w: innerWidth, h: innerHeight });
+  const $ = sel => { try { return document.querySelector(sel); } catch (e) { return null; } };
+  const $$ = sel => { try { return Array.from(document.querySelectorAll(sel)); } catch (e) { return []; } };
+  const js = expr => { try { const v = eval(expr); return v === undefined ? null : JSON.parse(JSON.stringify(v)); }
+    catch (e) { return 'js error: ' + String(e && e.message || e); } };
+  const goto_url = u => { acts.push({ op: 'goto', url: String(u) }); return 'queued goto ' + u; };
+  const new_tab = u => { acts.push({ op: 'new_tab', url: String(u) }); return 'queued new_tab ' + u; };
+  const wait_for_load = () => { acts.push({ op: 'wait' }); return 'queued wait_for_load'; };
+  const click_at_xy = (x, y) => { acts.push({ op: 'click', x: Number(x), y: Number(y) });
+    return 'queued click ' + x + ',' + y; };
+  const type_text = (sel, text) => {
+    const el = typeof sel === 'string' ? document.querySelector(sel) : sel;
+    if (!el) return false;
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (setter && setter.set) setter.set.call(el, String(text)); else el.value = String(text);
+    } else {
+      if (el.focus) el.focus();
+      if ('value' in el) el.value = String(text); else el.textContent = String(text);
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  };
+  const list_tabs = () => tabs;
+  const orig = { log: console.log, info: console.info, warn: console.warn, error: console.error };
+  const cap = (...a) => { out.push(a.map(fmt).join(' ')); };
+  console.log = cap; console.info = cap; console.warn = cap; console.error = cap;
+  let value = undefined, error = null;
+  const code = @@CODE@@;
+  try { value = eval(code); }
+  catch (e) {
+    if (e instanceof SyntaxError && /return/.test(String((e && e.message) || e))) {
+      try { value = eval('(function(){' + code + '\n})()'); }
+      catch (e2) { error = String((e2 && e2.stack) || e2); }
+    } else { error = String((e && e.stack) || e); }
+  }
+  finally {
+    console.log = orig.log; console.info = orig.info;
+    console.warn = orig.warn; console.error = orig.error;
+  }
+  let vout = null;
+  if (value !== undefined) { try { vout = JSON.parse(JSON.stringify(value)); } catch (e) { vout = String(value); } }
+  let nsout = null;
+  try { nsout = JSON.parse(JSON.stringify(ns)); } catch (e) { nsout = null; }
+  let output = out.join('\n');
+  if (output && error) output = output + '\n' + error;
+  else if (!output) output = error || '(no output)';
+  return JSON.stringify({ output: output, value: vout, error: error, ns: nsout, acts: acts });
 })()"#;
 
 #[tool_router]
@@ -4706,6 +4782,83 @@ impl GhostcloakServer {
     }
 
     #[tool(
+        description = "Wait until a TEXT STRING appears in the page (visible body text + document title) — the browser-use wait_for(text) mode. Use when you know the CONTENT you expect (\"Order confirmed\", \"Loading… done\", your typed value echoed back) but have no selector for it; page_wait_for covers the selector case. Case-insensitive by default. Returns true when found, false on timeout; includes waited_ms either way. Polls every 200ms, so a fast SPA transition isn't missed."
+    )]
+    async fn page_wait_for_text(
+        &self,
+        Parameters(WaitForTextParams {
+            session_id,
+            page_id,
+            text,
+            timeout_ms,
+            case_sensitive,
+        }): Parameters<WaitForTextParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        if text.is_empty() {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "text must not be empty".to_string(),
+                None,
+            ));
+        }
+        let timeout = timeout_ms.unwrap_or(10_000).min(60_000);
+        let cs = case_sensitive.unwrap_or(false);
+        // innerText skips display:none subtrees (that's what "visible"
+        // means), so a hidden marker text never satisfies the wait.
+        let needle = serde_json::to_string(&text)
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let compare = if cs {
+            format!("hay.includes({needle})")
+        } else {
+            format!("hay.toLowerCase().includes({needle}.toLowerCase())")
+        };
+        let expr = format!(
+            "(function(){{ const hay = ((document.body && document.body.innerText) || '') \
+             + '\\n' + (document.title || ''); return {compare}; }})()",
+        );
+        let start = std::time::Instant::now();
+        let timeout_dur = std::time::Duration::from_millis(timeout);
+        loop {
+            // Transient evaluate failures (mid-navigation, busy loop) must
+            // not abort the wait — keep polling until the deadline.
+            if let Ok(v) = page.evaluate(&expr).await {
+                if v.as_bool() == Some(true) {
+                    let waited = start.elapsed().as_millis();
+                    let _ = self.recorder.record(
+                        &session_id,
+                        "page_wait_for_text",
+                        Some(&page_id),
+                        serde_json::json!({ "found": true, "waited_ms": waited }),
+                    );
+                    return Ok(text_result(
+                        serde_json::json!({ "found": true, "waited_ms": waited }).to_string(),
+                    ));
+                }
+            }
+            if start.elapsed() >= timeout_dur {
+                let waited = start.elapsed().as_millis();
+                let _ = self.recorder.record(
+                    &session_id,
+                    "page_wait_for_text",
+                    Some(&page_id),
+                    serde_json::json!({ "found": false, "waited_ms": waited }),
+                );
+                return Ok(text_result(
+                    serde_json::json!({ "found": false, "waited_ms": waited }).to_string(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    #[tool(
         description = "Upload a file to an input[type=file] by CSS selector. The file must exist on the machine running the engine."
     )]
     async fn page_upload_file(
@@ -5282,6 +5435,228 @@ impl GhostcloakServer {
             ),
             None => text_result(serde_json::to_string(&value).unwrap_or_default()),
         })
+    }
+
+    #[tool(
+        description = "EXECUTE A JS PROGRAM IN THE PAGE (browser-use browser_exec) — the escape hatch when page_eval's single expression isn't enough. Multi-statement scripts, loops, closures: print()/log() (captured output — returned as `output`, '(no output)' if silent), console.log also captured. Pre-imported helpers: page_info() → {url,title,ready,w,h}; $(sel)/$$(sel) querySelector/all; type_text(sel,text) sets value + fires input/change; js(expr) evaluates a sub-expression; QUEUED actions executed by the server AFTER your script returns — goto_url(url) navigates (waits for DOM, returns final URL), new_tab(url) opens a tab (returns its page_id), click_at_xy(x,y) real engine mouse click, wait_for_load() waits for DOM — so inspect-then-act chains (read the DOM, then click the right thing) fit in ONE call. list_tabs() → [{page_id,url}]. STATE: write scratch data to `ns` (a plain object) — it persists server-side across calls AND across navigation (page globals are wiped on goto_url); top-level script vars do NOT persist. Errors return the traceback in `error`/`output` without failing the call. Calls serialize (one at a time). Prefer page_eval for a one-line expression, page_init_script for code that must run before every document. Returns {output, value, error?, actions}."
+    )]
+    async fn browser_exec(
+        &self,
+        Parameters(BrowserExecParams {
+            session_id,
+            page_id,
+            code,
+            reset_ns,
+        }): Parameters<BrowserExecParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        // browser-use's exec lock: ns is read-modify-write across the eval,
+        // so concurrent browser_exec calls must not interleave.
+        let _guard = self.exec_lock.lock().await;
+        let ns = if reset_ns.unwrap_or(false) {
+            serde_json::json!({})
+        } else {
+            self.state
+                .read()
+                .await
+                .exec_ns
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}))
+        };
+        // Tab list for list_tabs(): id + url, best effort.
+        let mut tabs: Vec<serde_json::Value> = Vec::new();
+        for id in session.page_ids().await {
+            let url = match session.page(&id).await {
+                Ok(p) => p.url().await.unwrap_or_default(),
+                Err(_) => String::new(),
+            };
+            tabs.push(serde_json::json!({ "page_id": id, "url": url }));
+        }
+        // Escape `@` in every payload so user data can't forge `@@KEY@@`
+        // placeholders (JSON allows @ only inside strings, where @ is a
+        // faithful stand-in).
+        let ns_json = serde_json::to_string(&ns)
+            .unwrap_or_else(|_| "{}".into())
+            .replace('@', "\\u0040");
+        let tabs_json = serde_json::to_string(&tabs)
+            .unwrap_or_else(|_| "[]".into())
+            .replace('@', "\\u0040");
+        let code_json = serde_json::to_string(&code)
+            .unwrap_or_else(|_| "\"\"".into())
+            .replace('@', "\\u0040");
+        let program = BROWSEREXEC_JS
+            .replace("@@NS@@", &ns_json)
+            .replace("@@TABS@@", &tabs_json)
+            .replace("@@CODE@@", &code_json);
+        // Hard 20s cap, same as page_eval: a while(true) in the script must
+        // not wedge the call for the engine's ~100s default.
+        let raw = match tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            page.evaluate(&program),
+        )
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                return Err(rmcp::model::ErrorData::internal_error(e.to_string(), None));
+            }
+            Err(_) => {
+                return Err(rmcp::model::ErrorData::internal_error(
+                    "browser_exec timed out after 20s — the program probably blocks (infinite \
+                     loop); avoid while(true)/for(;;) and prefer short, terminating scripts. \
+                     NOTE: the page may stay unresponsive until the loop ends.",
+                    None,
+                ));
+            }
+        };
+        let parsed = raw
+            .as_str()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .unwrap_or_else(|| {
+                serde_json::json!({ "output": raw.to_string(), "value": null, "error": null })
+            });
+        // Persist the scratch namespace (size-capped so a runaway script
+        // can't grow the server's state without bound).
+        if let Some(ns_val) = parsed.get("ns") {
+            if !ns_val.is_null() {
+                let bytes = serde_json::to_string(ns_val).map(|s| s.len()).unwrap_or(0);
+                if bytes <= 65_536 {
+                    self.state
+                        .write()
+                        .await
+                        .exec_ns
+                        .insert(session_id.clone(), ns_val.clone());
+                }
+            }
+        }
+        // Run queued actions in order (goto/new_tab/click/wait), with the
+        // same URL scheme allowlist page_open enforces.
+        let mut actions: Vec<serde_json::Value> = Vec::new();
+        if let Some(queued) = parsed.get("acts").and_then(serde_json::Value::as_array) {
+            for act in queued.iter().take(8) {
+                let op = act.get("op").and_then(serde_json::Value::as_str).unwrap_or("");
+                let url = act.get("url").and_then(serde_json::Value::as_str).unwrap_or("");
+                let scheme_ok = {
+                    let u = url.trim().to_ascii_lowercase();
+                    u.starts_with("http://")
+                        || u.starts_with("https://")
+                        || u.starts_with("about:")
+                        || u.starts_with("data:text/html")
+                };
+                match op {
+                    "goto" if !scheme_ok => actions.push(serde_json::json!({
+                        "op": "goto", "url": url, "ok": false,
+                        "error": "URL scheme not allowed — use http(s)://",
+                    })),
+                    "goto" => match page.navigate(url).await {
+                        Ok(()) => {
+                            wait_for_dom(&page).await;
+                            let landed = settled_url(&page).await;
+                            actions.push(
+                                serde_json::json!({ "op": "goto", "url": landed, "ok": true }),
+                            );
+                        }
+                        Err(e) => actions.push(serde_json::json!({
+                            "op": "goto", "url": url, "ok": false, "error": e.to_string(),
+                        })),
+                    },
+                    "new_tab" if !scheme_ok => actions.push(serde_json::json!({
+                        "op": "new_tab", "url": url, "ok": false,
+                        "error": "URL scheme not allowed — use http(s)://",
+                    })),
+                    "new_tab" => {
+                        let before = session.page_ids().await;
+                        match session.new_page(Some(url)).await {
+                            Ok(_) => {
+                                let after = session.page_ids().await;
+                                let new_id = after
+                                    .into_iter()
+                                    .find(|id| !before.contains(id))
+                                    .unwrap_or_default();
+                                if !new_id.is_empty() {
+                                    if let Ok(p) = session.page(&new_id).await {
+                                        wait_for_dom(&p).await;
+                                        // Same default dialog policy as
+                                        // page_open: alert() would wedge the
+                                        // new tab's evals otherwise.
+                                        if let Err(e) =
+                                            p.dialog_setup(true, Some(String::new())).await
+                                        {
+                                            tracing::warn!(
+                                                target: "ghostcloak::dialog",
+                                                "browser_exec new_tab dialog arm failed for \
+                                                 {new_id}: {e}"
+                                            );
+                                        }
+                                    }
+                                }
+                                actions.push(serde_json::json!({
+                                    "op": "new_tab", "page_id": new_id, "url": url, "ok": true,
+                                }));
+                            }
+                            Err(e) => actions.push(serde_json::json!({
+                                "op": "new_tab", "url": url, "ok": false, "error": e.to_string(),
+                            })),
+                        }
+                    }
+                    "click" => {
+                        let x = act.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                        let y = act.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                        let name = format!("gfx_bexec_click_{}", actions.len());
+                        match Self::hc_click_xy(&page, x, y, &name).await {
+                            Ok(()) => actions.push(serde_json::json!({
+                                "op": "click", "x": x, "y": y, "ok": true,
+                            })),
+                            Err(e) => actions.push(serde_json::json!({
+                                "op": "click", "x": x, "y": y, "ok": false,
+                                "error": e.to_string(),
+                            })),
+                        }
+                    }
+                    "wait" => {
+                        wait_for_dom(&page).await;
+                        actions.push(serde_json::json!({ "op": "wait", "ok": true }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let has_error = parsed
+            .get("error")
+            .map(|e| !e.is_null())
+            .unwrap_or(false);
+        let _ = self.recorder.record(
+            &session_id,
+            "browser_exec",
+            Some(&page_id),
+            serde_json::json!({
+                "len": code.len(),
+                "actions": actions.len(),
+                "error": has_error,
+            }),
+        );
+        let mut result = serde_json::json!({
+            "output": parsed
+                .get("output")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(no output)"),
+            "value": parsed.get("value").cloned().unwrap_or(serde_json::Value::Null),
+            "actions": actions,
+        });
+        if let Some(err) = parsed.get("error").filter(|e| !e.is_null()) {
+            result["error"] = err.clone();
+        }
+        Ok(text_result(
+            serde_json::to_string_pretty(&result).unwrap_or_default(),
+        ))
     }
 
     #[tool(

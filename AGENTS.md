@@ -725,6 +725,51 @@ Qwen / Llama calls against Cloudflare Workers AI) deleted; 0 callers since
 the agent-in-the-loop refactor. No third-party solving path exists anywhere
 in the crate (`grep api.cloudflare.com` → dead code only, now gone).
 
+
+## 11. browser_exec — the escape hatch (v0.9) + page_wait_for_text
+
+**`browser_exec(session_id, page_id, code)`** runs a JS *program* (not a
+single expression like `page_eval`) inside the page, browser-use style.
+
+- **Output**: `print()`/`log()`/`console.log` are captured → `{output, value,
+  error?, actions}`. Empty output reads `(no output)`. A thrown error comes
+  back as a traceback in `error`/`output` — the call still succeeds, so you
+  can read what went wrong and retry in the same breath.
+- **Pre-imported helpers**: `page_info()` (url/title/ready/viewport),
+  `$(sel)` / `$$(sel)`, `js(expr)` (JSON-safe sub-eval), `type_text(sel,
+  text)` (native setter + input/change events, React-safe), `list_tabs()`.
+- **Queued actions run AFTER your script returns**: `goto_url(url)` (waits
+  for DOM, returns final URL), `new_tab(url)` (returns its `page_id`),
+  `click_at_xy(x, y)` (REAL engine mouse via the humanized click path),
+  `wait_for_load()`. Why queued: navigating *inside* the eval would destroy
+  the context we're reading results from. Each queued action's outcome lands
+  in `actions[]` — check it (`ok`, final `url`, `page_id`, or `error`).
+  Max 8 actions per call; same http(s) scheme allowlist as `page_open`.
+- **State lives in `ns`**: a plain object persisted SERVER-side per session
+  — survives both your calls AND `goto_url` navigation (page globals are
+  wiped on navigation). Top-level `var`/`let` in your script do NOT persist.
+  `reset_ns: true` clears it. Capped at 64KB.
+- **Serialized**: one `browser_exec` at a time (the exec lock), so two
+  scripts can't interleave read-modify-write of `ns`. 20s hard timeout,
+  same as `page_eval`.
+
+**When NOT to use it**: one expression → `page_eval`; code that must run
+before every document (SPAs) → `page_init_script`; you have a ref →
+`page_click_ref`/`page_type_ref` (fire-and-verify receipts beat blind JS).
+
+**Recipe — inspect-then-act in ONE call:**
+```json
+{"code": "const rows = $$('#orders tbody tr');\nprint('rows:', rows.length);\nconst target = rows.find(r => r.cells[2].textContent === 'PENDING');\nif (target) { const r = target.getBoundingClientRect(); click_at_xy(r.x + 12, r.y + r.height/2); print('clicked', target.cells[0].textContent); }\nelse print('nothing pending');"}
+```
+The click is queued → runs after the script with the real mouse; read
+`actions[0].ok` to confirm.
+
+**`page_wait_for_text(session_id, page_id, text, timeout_ms?, case_sensitive?)`**
+— wait for CONTENT, not a selector: polls visible `body.innerText` + title
+(case-insensitive by default) every 200ms. Returns
+`{found: bool, waited_ms}`. Use `page_wait_for` when you have a selector,
+`page_wait_for_idle` when you need network quiet.
+
 ---
 
 *This playbook is maintained from real runs. When you find a new wall and

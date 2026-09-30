@@ -770,6 +770,13 @@ The click is queued → runs after the script with the real mouse; read
 `{found: bool, waited_ms}`. Use `page_wait_for` when you have a selector,
 `page_wait_for_idle` when you need network quiet.
 
+**`page_wait_rate_limit(session_id, page_id, max_wait_s?)`** — section 4's
+"wait it out" as a tool: parses `rate_limit_seconds`/notifications from a
+fresh `page_a11y` snapshot, sleeps out the stated window (default 60s,
+cap 180s, jittered), re-reads, reports `{cleared, waited_s, attempts,
+rate_limit_seconds, notifications}`. READ-ONLY, no exec lock — call it
+after a throttled response instead of retrying into the wall.
+
 ---
 
 *This playbook is maintained from real runs. When you find a new wall and

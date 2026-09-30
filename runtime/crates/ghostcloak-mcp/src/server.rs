@@ -313,6 +313,16 @@ struct WaitForTextParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct WaitRateLimitParams {
+    session_id: String,
+    page_id: String,
+    /// How long to wait in total before giving up (seconds). Default 60,
+    /// hard cap 180 — never wait forever; report cleared=false instead.
+    #[serde(default)]
+    max_wait_s: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct UploadParams {
     session_id: String,
     page_id: String,
@@ -899,7 +909,14 @@ async fn wait_for_dom(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) {
 /// Read the page URL, tolerating the mid-commit window where a reload or
 /// history move still reports `about:blank` (poll up to ~6s).
 async fn settled_url(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) -> String {
+    // Overall deadline: url() = evaluate, and a single evaluate can burn
+    // ~112s against a dead context — "24 tries" alone could hold a caller
+    // (and exec_lock) for ~45min. Cap the whole poll at 10s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     for _ in 0..24 {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
         match page.url().await {
             Ok(u) if u != "about:blank" && !u.is_empty() => return u,
             Ok(u) => {
@@ -912,7 +929,12 @@ async fn settled_url(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) -> Str
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
         }
     }
-    page.url().await.unwrap_or_default()
+    // Best-effort final read, hard-bounded so this fn can never wedge.
+    tokio::time::timeout(std::time::Duration::from_secs(5), page.url())
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default()
 }
 
 fn text_result(s: impl Into<String>) -> CallToolResult {
@@ -4866,6 +4888,89 @@ impl GhostcloakServer {
     }
 
     #[tool(
+        description = "RATE-LIMIT WAIT — AGENTS.md playbook: NEVER retry into a rate limit, WAIT it out. Reads the page's parsed rate_limit_seconds + notifications (same detection page_a11y uses: 'try again in N seconds/minutes' toasts — Reddit, HN, Cloudflare interstitials), sleeps until the window should be over, re-reads a fresh snapshot, and reports {cleared, waited_s, attempts, rate_limit_seconds, notifications}. Bounded by max_wait_s (default 60, hard cap 180) with a little jitter, so it reports cleared=false rather than hammering or blocking forever. READ-ONLY (fresh a11y snapshots only, no clicks/typing) and does not hold the browser_exec lock. Call it after seeing rate_limit_seconds in a page_a11y result, or right before a request you expect to be throttled."
+    )]
+    async fn page_wait_rate_limit(
+        &self,
+        Parameters(WaitRateLimitParams {
+            session_id,
+            page_id,
+            max_wait_s,
+        }): Parameters<WaitRateLimitParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let budget = max_wait_s.unwrap_or(60).min(180);
+        let start = std::time::Instant::now();
+        let mut attempts: u64 = 0;
+        loop {
+            attempts += 1;
+            // Transient snapshot failures mid-load must not abort the wait —
+            // keep polling until the budget burns (same stance as
+            // page_wait_for_text's evaluate loop).
+            let snap = match page.a11y_snapshot().await {
+                Ok(s) => s,
+                Err(e) if start.elapsed().as_secs() >= budget => {
+                    return Err(rmcp::model::ErrorData::internal_error(
+                        format!("a11y snapshot failed during rate-limit wait: {e}"),
+                        None,
+                    ));
+                }
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+            let rl = snap.rate_limit_seconds.unwrap_or(0);
+            if rl == 0 {
+                let obj = serde_json::json!({
+                    "cleared": true,
+                    "waited_s": start.elapsed().as_secs(),
+                    "attempts": attempts,
+                    "rate_limit_seconds": null,
+                    "notifications": snap.notifications,
+                });
+                let _ = self.recorder.record(
+                    &session_id,
+                    "page_wait_rate_limit",
+                    Some(&page_id),
+                    serde_json::json!({ "cleared": true, "waited_s": start.elapsed().as_secs() }),
+                );
+                return Ok(text_result(serde_json::to_string_pretty(&obj).unwrap_or_default()));
+            }
+            let waited = start.elapsed().as_secs();
+            if waited >= budget {
+                let obj = serde_json::json!({
+                    "cleared": false,
+                    "waited_s": waited,
+                    "attempts": attempts,
+                    "rate_limit_seconds": rl,
+                    "notifications": snap.notifications,
+                });
+                let _ = self.recorder.record(
+                    &session_id,
+                    "page_wait_rate_limit",
+                    Some(&page_id),
+                    serde_json::json!({ "cleared": false, "waited_s": waited }),
+                );
+                return Ok(text_result(serde_json::to_string_pretty(&obj).unwrap_or_default()));
+            }
+            // Sleep out the site's stated window, bounded by remaining
+            // budget, with a small jitter so N agents don't re-fire in
+            // lockstep (playbook: exponential backoff is per-request —
+            // here we only pace the re-read).
+            let sleep_s = rl.min(budget - waited).saturating_add(attempts % 3);
+            tokio::time::sleep(std::time::Duration::from_secs(sleep_s.max(1))).await;
+        }
+    }
+
+    #[tool(
         description = "Upload a file to an input[type=file] by CSS selector. The file must exist on the machine running the engine."
     )]
     async fn page_upload_file(
@@ -5547,7 +5652,19 @@ impl GhostcloakServer {
         // same URL scheme allowlist page_open enforces.
         let mut actions: Vec<serde_json::Value> = Vec::new();
         if let Some(queued) = parsed.get("acts").and_then(serde_json::Value::as_array) {
+            // Total budget for ALL queued actions: even with every arm
+            // individually bounded, 8 worst-case arms could pin exec_lock
+            // for many minutes. Stop cleanly when the budget burns.
+            let act_deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(90);
             for act in queued.iter().take(8) {
+                if std::time::Instant::now() > act_deadline {
+                    actions.push(serde_json::json!({
+                        "op": "budget", "ok": false,
+                        "error": "action budget (90s) exceeded — remaining actions skipped",
+                    }));
+                    break;
+                }
                 let op = act
                     .get("op")
                     .and_then(serde_json::Value::as_str)
@@ -5647,13 +5764,25 @@ impl GhostcloakServer {
                             .and_then(serde_json::Value::as_f64)
                             .unwrap_or(0.0);
                         let name = format!("gfx_bexec_click_{}", actions.len());
-                        match Self::hc_click_xy(&page, x, y, &name).await {
-                            Ok(()) => actions.push(serde_json::json!({
+                        // drag_ref is a long humanized sequence (~10-30 RPCs;
+                        // each ≤20s, aggregate unbounded) — hard-cap it so a
+                        // wedged page can't hold exec_lock for minutes.
+                        let click = tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            Self::hc_click_xy(&page, x, y, &name),
+                        )
+                        .await;
+                        match click {
+                            Ok(Ok(())) => actions.push(serde_json::json!({
                                 "op": "click", "x": x, "y": y, "ok": true,
                             })),
-                            Err(e) => actions.push(serde_json::json!({
+                            Ok(Err(e)) => actions.push(serde_json::json!({
                                 "op": "click", "x": x, "y": y, "ok": false,
                                 "error": e.to_string(),
+                            })),
+                            Err(_) => actions.push(serde_json::json!({
+                                "op": "click", "x": x, "y": y, "ok": false,
+                                "error": "click timed out after 30s",
                             })),
                         }
                     }

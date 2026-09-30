@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text + title (browser-use `wait_for(text)` mode), case-insensitive by
   default, 200ms poll, returns `{found, waited_ms}` — the content-based
   counterpart to `page_wait_for` (selector-based).
+- **`page_wait_rate_limit`** — AGENTS.md playbook automation ("NEVER retry
+  into a rate limit, WAIT it out"): reuses page_a11y's parsed
+  `rate_limit_seconds` + notifications ("try again in N seconds/minutes"
+  toasts), sleeps out the stated window with jitter, re-reads a fresh
+  snapshot, and reports `{cleared, waited_s, attempts, rate_limit_seconds,
+  notifications}` — bounded (default 60s, hard cap 180s), READ-ONLY, and
+  does not hold the exec lock, so a throttled site gets one paced wait
+  instead of a hammer.
 
 ### Fixed
 
@@ -36,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subsequent browser_exec call blocked behind `exec_lock`. Fragment-only
   URLs now jump in-page (`location.href`), and `wait_for_dom` got an
   overall 12s deadline instead of an iteration count alone.
+- **`browser_exec` action-loop bounds (audit)** — `settled_url` now has an
+  overall 10s deadline (24 × ~112s worst-case evaluate ≈ 45min), the
+  queued `click_at_xy` arm is capped at 30s (`drag_ref` is a long
+  humanized RPC sequence with only per-step bounds), and the whole queued
+  actions loop shares a 90s budget that stops with an honest
+  `{op: "budget"}` entry — no single arm can pin `exec_lock` for minutes
+  anymore.
 
 ### Changed
 

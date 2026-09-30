@@ -869,12 +869,17 @@ fn heal_js(src: &str, err: &str) -> Option<(String, &'static str)> {
         || err.contains("Unexpected token")
         || err.contains("Invalid or unexpected token")
         || err.contains("missing ) after argument list")
-        || err.contains("Illegal return statement");
+        || err.contains("Illegal return statement")
+        // Juggler/Firefox wording for a top-level `return`
+        || err.contains("return not in function");
     if !syntax {
         return None;
     }
     // 1. top-level `return` (LLM wrote a statement instead of an expression)
-    if err.contains("Illegal return statement") || src.trim_start().starts_with("return ") {
+    if err.contains("Illegal return statement")
+        || err.contains("return not in function")
+        || src.trim_start().starts_with("return ")
+    {
         return Some((
             format!("(function(){{ {} }})()", src),
             "wrapped top-level return in an IIFE",
@@ -953,12 +958,12 @@ const HITTEST_JS: &str = r#"(()=>{
 
 const EXTRACT_JS: &str = r#"(()=>{
   const sel = "@@SEL@@";
-  const seen = new Set(@@DEDUP@@);
   const capN = @@MAXI@@;
   const txt = e => (e.innerText || '').trim();
+  const keyOf = s => (s || '').trim().slice(0, 300);
+  const seen = new Set(@@DEDUP@@.map(keyOf));
   const out = { tables: [], lists: [], items: [] };
   let dropped = 0;
-  const keyOf = s => (s || '').trim().slice(0, 300);
   const tbl = t => ({
     caption: t.caption ? txt(t.caption) : null,
     headers: [...(t.tHead && t.tHead.rows.length ? t.tHead.rows[0].cells

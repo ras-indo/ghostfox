@@ -2417,6 +2417,8 @@ impl GhostcloakServer {
                             session_id: session_id.clone(),
                             page_id: page_id.clone(),
                             selector: sel,
+                            button: None,
+                            click_count: None,
                         }))
                         .await
                     }

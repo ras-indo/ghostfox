@@ -51,9 +51,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions loop shares a 90s budget that stops with an honest
   `{op: "budget"}` entry — no single arm can pin `exec_lock` for minutes
   anymore.
+- **`browser_exec` remaining naked `page.url()` reads bounded** (post-review)
+  — the tab-listing loop (per tab, before the script's 20s cap) and the
+  goto arm's same-document probe now hard-cap at 3s each; both were
+  evaluate-cost (~112s worst on a dead context) sitting inside `exec_lock`.
+- **`page_a11y` sanitization: opacity checked up the ancestor chain**
+  (post-review) — opacity does NOT inherit, so an `opacity:0` ancestor
+  with an `opacity:1` child reported computed opacity 1 and let hidden
+  text through into the sanitized `name`/`value`; `visibleText` now walks
+  `parentElement` to the root (font-size/visibility already resolve via
+  computed inheritance, `aria-hidden` already used `closest()`).
 
 ### Changed
 
+- **`browser_exec` responses are honest about state** (post-review) —
+  an oversize `ns` (>64KB cap) now returns `ns_dropped: true` instead of
+  silently discarding the scratch namespace; a queued `wait` action
+  reports `settled: bool` (whether the DOM actually appeared within the
+  deadline, not just that we waited); an unrecognized queued action op
+  returns `{ok: false, error}` instead of being dropped without a trace.
 - **`page_a11y` content sanitization** (ROADMAP v0.5 prompt-injection
   defense) — hidden text (`font-size:0`, `opacity<0.01`, `visibility:hidden`,
   `aria-hidden` subtrees) is now STRIPPED from innerText-derived element

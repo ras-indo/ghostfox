@@ -49,7 +49,17 @@ pub(crate) const WALK_JS: &str = r#"(
         var s = getComputedStyle(p);
         if (s.display === 'none' || s.visibility === 'hidden') continue;
         if (parseFloat(s.fontSize) === 0) continue;
-        if (s.opacity !== '' && parseFloat(s.opacity) < 0.01) continue;
+        // opacity does NOT inherit: an ancestor with opacity:0 still
+        // composites the whole subtree away, while getComputedStyle on
+        // this parent reports its own 1 — walk the chain (font-size and
+        // visibility resolve through computed inheritance, opacity doesn't).
+        var opEl = p, faded = false;
+        while (opEl) {
+          var opv = getComputedStyle(opEl).opacity;
+          if (opv !== '' && parseFloat(opv) < 0.01) { faded = true; break; }
+          opEl = opEl.parentElement;
+        }
+        if (faded) continue;
         parts.push(node.nodeValue);
       }
       return parts.join('').replace(/\s+/g, ' ').trim();

@@ -890,20 +890,21 @@ impl GhostcloakServer {
 /// Block until `document.body` exists (max ~15s) so callers never race a
 /// blank document: page_open/page_back/page_reload used to return before
 /// the DOM was parseable, failing every follow-up call.
-async fn wait_for_dom(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) {
+async fn wait_for_dom(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) -> bool {
     // Overall deadline, not just per-iteration: a dead execution context
     // makes each evaluate() burn up to ~35s in retry backoff, so "60 tries"
     // alone can hold a caller (and exec_lock) hostage for half an hour.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
     for _ in 0..60 {
         if std::time::Instant::now() > deadline {
-            break;
+            return false;
         }
         match page.evaluate("!!document.body").await {
-            Ok(v) if v.as_bool() == Some(true) => break,
+            Ok(v) if v.as_bool() == Some(true) => return true,
             _ => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
         }
     }
+    false
 }
 
 /// Read the page URL, tolerating the mid-commit window where a reload or
@@ -5592,7 +5593,14 @@ impl GhostcloakServer {
         let mut tabs: Vec<serde_json::Value> = Vec::new();
         for id in session.page_ids().await {
             let url = match session.page(&id).await {
-                Ok(p) => p.url().await.unwrap_or_default(),
+                // Bound each read: url() is an evaluate (~112s worst on a
+                // dead context) and this runs per tab BEFORE the script's
+                // own 20s cap — unbounded here means minutes on exec_lock.
+                Ok(p) => tokio::time::timeout(std::time::Duration::from_secs(3), p.url())
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or_default(),
                 Err(_) => String::new(),
             };
             tabs.push(serde_json::json!({ "page_id": id, "url": url }));
@@ -5640,6 +5648,7 @@ impl GhostcloakServer {
             );
         // Persist the scratch namespace (size-capped so a runaway script
         // can't grow the server's state without bound).
+        let mut ns_dropped = false;
         if let Some(ns_val) = parsed.get("ns") {
             if !ns_val.is_null() {
                 let bytes = serde_json::to_string(ns_val).map(|s| s.len()).unwrap_or(0);
@@ -5649,6 +5658,10 @@ impl GhostcloakServer {
                         .await
                         .exec_ns
                         .insert(session_id.clone(), ns_val.clone());
+                } else {
+                    // Never silently lose the user's scratch data — surface
+                    // it in the response so the agent can trim consciously.
+                    ns_dropped = true;
                 }
             }
         }
@@ -5695,7 +5708,16 @@ impl GhostcloakServer {
                         // an event that never arrives — evaluate falls back
                         // to a frame id juggler rejects, wedging exec_lock
                         // for ~30min (wait_for_dom churn). Do it in-page.
-                        let cur = page.url().await.unwrap_or_default();
+                        // Bounded: same evaluate cost as settled_url — a
+                        // dead context must not stall the goto arm here.
+                        let cur = tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            page.url(),
+                        )
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok())
+                        .unwrap_or_default();
                         let strip_frag = |u: &str| u.split('#').next().unwrap_or("").to_string();
                         let same_doc = !cur.is_empty() && strip_frag(&cur) == strip_frag(url);
                         let nav_res = if same_doc {
@@ -5790,10 +5812,16 @@ impl GhostcloakServer {
                         }
                     }
                     "wait" => {
-                        wait_for_dom(&page).await;
-                        actions.push(serde_json::json!({ "op": "wait", "ok": true }));
+                        let settled = wait_for_dom(&page).await;
+                        actions.push(
+                            serde_json::json!({ "op": "wait", "ok": true, "settled": settled }),
+                        );
                     }
-                    _ => {}
+                    other => actions.push(serde_json::json!({
+                        "op": other,
+                        "ok": false,
+                        "error": "unknown action op — supported: goto, new_tab, click, wait",
+                    })),
                 }
             }
         }
@@ -5816,6 +5844,9 @@ impl GhostcloakServer {
             "value": parsed.get("value").cloned().unwrap_or(serde_json::Value::Null),
             "actions": actions,
         });
+        if ns_dropped {
+            result["ns_dropped"] = serde_json::Value::Bool(true);
+        }
         if let Some(err) = parsed.get("error").filter(|e| !e.is_null()) {
             result["error"] = err.clone();
         }

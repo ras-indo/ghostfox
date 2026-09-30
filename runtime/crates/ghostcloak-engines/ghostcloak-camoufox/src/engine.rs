@@ -3348,25 +3348,40 @@ impl PageHandle for CamoufoxPage {
                                 "evaluate timed out (page busy or hung): {msg}"
                             )));
                         }
-                    }
-                    // Drop EVERY cached id: a rejected id is proven dead, and
-                    // the old bug (retrying a dead frame id four times) must
-                    // be impossible now.
-                    *self.execution_context_id.lock().await = None;
-                    *self.frame_id.lock().await = None;
-                    *self.main_frame_id.lock().await = None;
-                    tracing::debug!(target: "ghostcloak::camoufox", "evaluate stale ({msg}); all ids cleared, recovering");
-                    if !recovery_issued {
-                        recovery_issued = true;
-                        // Runtime.enable is idempotent; juggler replays
-                        // executionContextCreated for live contexts, which is
-                        // how we resync when the original event was missed.
-                        if let Err(e) = self
-                            .conn
-                            .request_session("Runtime.enable", serde_json::json!({}), Some(&sid))
-                            .await
-                        {
-                            tracing::debug!(target: "ghostcloak::camoufox", "Runtime.enable recovery failed: {e}");
+                        // Busy page ≠ dead ids: keep the pins (a same-document
+                        // navigation emits NO replacement events, so a clear
+                        // here would starve the retry loop forever).
+                    } else if !(msg.contains("context") || msg.contains("cannot find session")) {
+                        // Not a stale-id rejection — don't punish the ids.
+                        return Err(GhostError::PageOp(format!("evaluate failed: {msg}")));
+                    } else {
+                        // We just sent THIS id and juggler rejected it. If it
+                        // was the frame id (context cache was empty → frame
+                        // fallback), the frame itself is proven dead — drop
+                        // the pins so the next mainframe-* event (prefix rule)
+                        // re-pins a fresh one. A rejected "id-N" only
+                        // invalidates the context.
+                        let sent_frame =
+                            self.frame_id.lock().await.as_deref() == Some(ctx.as_str());
+                        *self.execution_context_id.lock().await = None;
+                        if sent_frame {
+                            *self.frame_id.lock().await = None;
+                            *self.main_frame_id.lock().await = None;
+                        }
+                        tracing::debug!(target: "ghostcloak::camoufox", "evaluate stale ({msg}); sent_frame={sent_frame}, recovering");
+                        if !recovery_issued {
+                            recovery_issued = true;
+                            // Runtime.enable is idempotent; juggler replays
+                            // executionContextCreated for live contexts, which
+                            // is how we resync when the original event was
+                            // missed.
+                            if let Err(e) = self
+                                .conn
+                                .request_session("Runtime.enable", serde_json::json!({}), Some(&sid))
+                                .await
+                            {
+                                tracing::debug!(target: "ghostcloak::camoufox", "Runtime.enable recovery failed: {e}");
+                            }
                         }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(400 + attempt * 300)).await;

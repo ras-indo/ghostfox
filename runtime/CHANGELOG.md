@@ -61,14 +61,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Browser.detachedFromTarget` / `Inspector.targetCrashed` arms (session
   self-heal for main pages + full id clear on detach/crash).
   `evaluate()` itself is a bounded recovery ladder: fail fast with an
-  actionable message when the renderer is flagged crashed, on a stale
-  rejection drop ALL cached ids (a rejected id is proven dead — the old
-  bug of retrying a corpse frame id 4× is impossible now), re-issue
-  `Runtime.enable` once so juggler REPLAYS `executionContextCreated`
-  for live contexts (resync without needing a navigation), fall back to
-  the freshly pinned frame id, and finally return guidance
-  ("reopen with page_open") instead of raw channel noise. Hung-page
-  timeouts stop after two attempts instead of spinning for minutes.
+  actionable message when the renderer is flagged crashed; on a stale
+  rejection, drop the rejected id — and the frame pins TOO only when the
+  frame id itself was the rejected target (a rejected id is proven dead,
+  so retrying a corpse frame id 4× is impossible now, while a live frame
+  survives to anchor the fallback); busy-page timeouts never touch the
+  pins (same-document navigations emit no replacement events, so clearing
+  there would starve the retry loop) and stop after two attempts instead
+  of spinning for minutes; re-issue `Runtime.enable` once so juggler
+  REPLAYS `executionContextCreated` for live contexts (resync without a
+  navigation), fall back to the freshly pinned frame id, and finally
+  return guidance ("reopen with page_open") instead of raw channel
+  noise.
 - **`browser_exec` same-document `goto_url` wedged the exec lock** — a
   fragment-only jump never recreates the execution context, so navigate()'s
   context clear left evaluate() churning (~30min of retries) and every

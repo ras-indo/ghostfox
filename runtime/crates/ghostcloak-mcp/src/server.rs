@@ -330,6 +330,17 @@ struct PageScreenshotParams {
     /// Capture the whole scrollable document instead of the viewport (optional).
     #[serde(default)]
     full_page: Option<bool>,
+    /// Downscale so no side exceeds this many pixels (from browser-use —
+    /// e.g. 1800 on hiDPI). Cuts vision token cost massively (optional).
+    #[serde(default)]
+    max_dim: Option<u32>,
+    /// Output format: "png" (default, lossless) or "jpeg" (smaller payload,
+    /// use jpeg_quality). JPEG has no transparency (optional).
+    #[serde(default)]
+    format: Option<String>,
+    /// JPEG quality 1-100 (default 80). Ignored for png.
+    #[serde(default)]
+    jpeg_quality: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -499,6 +510,43 @@ struct ExtractParams {
     /// Omit for auto-detection of every table + list on the page.
     #[serde(default)]
     selector: Option<String>,
+    /// Cross-page dedup (from browser-use): identifiers (urls/texts) already
+    /// collected on previous pages — matching rows/list items are skipped.
+    #[serde(default)]
+    already_collected: Option<Vec<String>>,
+    /// Cap the number of rows/items returned (default 50 tables / 50 lists /
+    /// 500 items; counts always show the full totals so you know if capped).
+    #[serde(default)]
+    max_items: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GetHtmlParams {
+    session_id: String,
+    page_id: String,
+    /// CSS selector to grab one element's outerHTML. Omit for the full
+    /// document (documentElement.outerHTML).
+    #[serde(default)]
+    selector: Option<String>,
+    /// Hard cap in bytes (default 200000). The response reports
+    /// {bytes, truncated} so you always know when output was cut.
+    #[serde(default)]
+    max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct HitTestParams {
+    session_id: String,
+    page_id: String,
+    /// CSS selector to test (center point of its viewport rect).
+    #[serde(default)]
+    selector: Option<String>,
+    /// Viewport x coordinate — combine with y to test a raw point
+    /// (e.g. from page_vision / page_pixels).
+    #[serde(default)]
+    x: Option<f64>,
+    #[serde(default)]
+    y: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -811,6 +859,37 @@ fn text_result(s: impl Into<String>) -> CallToolResult {
 }
 
 /// Escape a Rust string for embedding inside a double-quoted JS string.
+/// Self-heal for common LLM-written JavaScript mistakes (from browser-use
+/// `_validate_and_fix_javascript`): returns (fixed_source, description) when a
+/// *safe* transform is likely to fix a SyntaxError, None otherwise. Only runs
+/// after the first evaluate() already failed, so a false-positive transform
+/// can never corrupt an expression that worked.
+fn heal_js(src: &str, err: &str) -> Option<(String, &'static str)> {
+    let syntax = err.contains("SyntaxError")
+        || err.contains("Unexpected token")
+        || err.contains("Invalid or unexpected token")
+        || err.contains("missing ) after argument list")
+        || err.contains("Illegal return statement");
+    if !syntax {
+        return None;
+    }
+    // 1. top-level `return` (LLM wrote a statement instead of an expression)
+    if err.contains("Illegal return statement") || src.trim_start().starts_with("return ") {
+        return Some((
+            format!("(function(){{ {} }})()", src),
+            "wrapped top-level return in an IIFE",
+        ));
+    }
+    // 2. over-escaped double quotes: `\"text\"` as a whole expression
+    if src.contains("\\\"") {
+        let fixed = src.replace("\\\"", "\"");
+        if fixed.contains('"') {
+            return Some((fixed, "removed over-escaping of double quotes"));
+        }
+    }
+    None
+}
+
 fn js_escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -818,10 +897,68 @@ fn js_escape(s: &str) -> String {
         .replace('\r', "")
 }
 
+const GETHTML_JS: &str = r#"(()=>{
+  const sel = "@@SEL@@", maxB = @@MAXB@@;
+  let node;
+  if (sel) {
+    try { node = document.querySelector(sel); }
+    catch(e) { return {error: "invalid selector: " + e.message}; }
+    if (!node) return {error: "no element matches " + sel};
+  } else {
+    node = document.documentElement;
+  }
+  const html = node.outerHTML || node.innerHTML || "";
+  const bytes = new Blob([html]).size;
+  const truncated = bytes > maxB;
+  return { html: truncated ? html.slice(0, maxB) : html,
+           bytes, truncated, selector: sel || "documentElement" };
+})()"#;
+
+const HITTEST_JS: &str = r#"(()=>{
+  const sel = "@@SEL@@", px = @@PX@@, py = @@PY@@;
+  let x = px, y = py, target = null;
+  if (sel) {
+    try { target = document.querySelector(sel); }
+    catch(e) { return {error: "invalid selector: " + e.message}; }
+    if (!target) return {error: "no element matches " + sel};
+    const r = target.getBoundingClientRect();
+    if (!r.width && !r.height) return {error: "element has zero size (display:none?)", target: sel};
+    x = r.left + r.width / 2;
+    y = r.top + r.height / 2;
+  } else if (x === null || y === null) {
+    return {error: "provide either selector or both x and y"};
+  }
+  if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight)
+    return {error: "point outside viewport", x, y, viewport: {w: innerWidth, h: innerHeight}};
+  const at = document.elementFromPoint(x, y);
+  const info = el => el ? { tag: el.tagName.toLowerCase(),
+    id: el.id || null,
+    cls: (el.className && el.className.toString ? el.className.toString() : "").slice(0, 80),
+    text: (el.innerText || "").trim().slice(0, 100) } : null;
+  if (!target)
+    return { x, y, element: info(at), note: "no target — this IS what sits at the point" };
+  const covers = at === target || target.contains(at) || (at ? at.contains(target) : false);
+  // <label for> / wrapped input: click on label activates input
+  let viaLabel = false;
+  if (!covers && at && (at.tagName === 'LABEL')) {
+    const tid = target.id;
+    if (tid && at.htmlFor === tid) viaLabel = true;
+    else if (at.contains(target)) viaLabel = true;
+  }
+  return { x, y, clickable: covers || viaLabel, via_label: viaLabel,
+    target: info(target), occluder: covers ? null : info(at),
+    hint: (covers || viaLabel) ? null
+      : "blocked — dismiss the overlay/cookie banner or scroll it out of the way first" };
+})()"#;
+
 const EXTRACT_JS: &str = r#"(()=>{
   const sel = "@@SEL@@";
+  const seen = new Set(@@DEDUP@@);
+  const capN = @@MAXI@@;
   const txt = e => (e.innerText || '').trim();
   const out = { tables: [], lists: [], items: [] };
+  let dropped = 0;
+  const keyOf = s => (s || '').trim().slice(0, 300);
   const tbl = t => ({
     caption: t.caption ? txt(t.caption) : null,
     headers: [...(t.tHead && t.tHead.rows.length ? t.tHead.rows[0].cells
@@ -831,16 +968,35 @@ const EXTRACT_JS: &str = r#"(()=>{
   const nodes = sel ? [...document.querySelectorAll(sel)]
                     : [...document.querySelectorAll('table,ul,ol')];
   for (const e of nodes) {
-    if (e.tagName === 'TABLE') out.tables.push(tbl(e));
-    else if (e.tagName === 'UL' || e.tagName === 'OL')
-      out.lists.push({ ordered: e.tagName === 'OL',
-        items: [...e.children].filter(c => c.tagName === 'LI').map(txt) });
-    else out.items.push({ tag: e.tagName.toLowerCase(), text: txt(e).slice(0, 2000),
+    if (e.tagName === 'TABLE') {
+      const t = tbl(e);
+      t.rows = t.rows.filter(r => {
+        const k = keyOf(r.join(' | '));
+        if (seen.has(k)) { dropped++; return false; }
+        seen.add(k);
+        return true;
+      });
+      out.tables.push(t);
+    } else if (e.tagName === 'UL' || e.tagName === 'OL') {
+      const its = [...e.children].filter(c => c.tagName === 'LI').map(txt).filter(it => {
+        const k = keyOf(it);
+        if (seen.has(k)) { dropped++; return false; }
+        seen.add(k);
+        return true;
+      });
+      out.lists.push({ ordered: e.tagName === 'OL', items: its });
+    } else {
+      const k = keyOf(e.href || e.src || txt(e));
+      if (seen.has(k)) { dropped++; continue; }
+      seen.add(k);
+      out.items.push({ tag: e.tagName.toLowerCase(), text: txt(e).slice(0, 2000),
         href: e.href || null, src: e.src || null,
         value: ('value' in e) ? String(e.value).slice(0, 2000) : null });
+    }
   }
-  return { tables: out.tables.slice(0, 50), lists: out.lists.slice(0, 50),
-    items: out.items.slice(0, 500),
+  const nT = Math.min(50, capN), nL = Math.min(50, capN), nI = Math.min(500, capN);
+  return { tables: out.tables.slice(0, nT), lists: out.lists.slice(0, nL),
+    items: out.items.slice(0, nI), dedup_dropped: dropped,
     counts: { tables: out.tables.length, lists: out.lists.length,
       items: out.items.length } };
 })()"#;
@@ -2112,10 +2268,25 @@ impl GhostcloakServer {
             session_id,
             page_id,
             selector,
+            already_collected,
+            max_items,
         }): Parameters<ExtractParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         let sel = selector.unwrap_or_default();
-        let expr = EXTRACT_JS.replace("@@SEL@@", &js_escape(&sel));
+        let dedup: Vec<String> = already_collected
+            .unwrap_or_default()
+            .into_iter()
+            .take(100)
+            .collect();
+        let cap = max_items.unwrap_or(500).min(2000);
+        let expr = EXTRACT_JS
+            .replace("@@SEL@@", &js_escape(&sel))
+            .replace(
+                "@@DEDUP@@",
+                &serde_json::to_string(&dedup)
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?,
+            )
+            .replace("@@MAXI@@", &cap.to_string());
         let r = self
             .page_eval(Parameters(PageEvalParams {
                 session_id: session_id.clone(),
@@ -2127,7 +2298,7 @@ impl GhostcloakServer {
             &session_id,
             "page_extract",
             Some(&page_id),
-            serde_json::json!({ "selector": sel }),
+            serde_json::json!({ "selector": sel, "dedup": dedup.len(), "max_items": cap }),
         );
         Ok(r)
     }
@@ -3518,6 +3689,105 @@ impl GhostcloakServer {
     }
 
     #[tool(
+        description = "RAW HTML DUMP (from browser-use browser_get_html): return outerHTML of the page \n\
+        or one element (selector). Reference-over-value: output is capped (max_bytes, default 200000) \n\
+        and the response reports {bytes, truncated} so you never silently lose data. Use page_markdown \n\
+        for token-friendly reading; use this when you need exact markup (forms, data attributes, \n\
+        nested structure). selector invalid/missing → clear error."
+    )]
+    async fn page_get_html(
+        &self,
+        Parameters(GetHtmlParams {
+            session_id,
+            page_id,
+            selector,
+            max_bytes,
+        }): Parameters<GetHtmlParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let expr = GETHTML_JS
+            .replace("@@SEL@@", &js_escape(&selector.unwrap_or_default()))
+            .replace(
+                "@@MAXB@@",
+                &max_bytes.unwrap_or(200_000).min(5_000_000).to_string(),
+            );
+        let r = page
+            .eval(&expr)
+            .await
+            .map_err(rmcp::model::ErrorData::internal_error)?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_get_html",
+            Some(&page_id),
+            serde_json::json!({}),
+        );
+        Ok(json_result(r))
+    }
+
+    #[tool(
+        description = "OCCLUSION PREFLIGHT (from browser-use default_action_watchdog): before clicking, \n\
+        check what actually sits at a point — cookie banners, sticky headers, overlays and modals \n\
+        are the #1 reason 'click had no effect'. Give selector (tests center of its rect) OR x/y \n\
+        (viewport coords from page_vision/page_pixels). Returns {clickable, occluder:{tag,id,text}, \n\
+        hint} — when blocked, dismiss the overlay or scroll first instead of blind-retrying the click. \n\
+        Also answers 'what element is at this coordinate' when no selector is given, and validates \n\
+        coordinates are inside the viewport."
+    )]
+    async fn page_hit_test(
+        &self,
+        Parameters(HitTestParams {
+            session_id,
+            page_id,
+            selector,
+            x,
+            y,
+        }): Parameters<HitTestParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        if selector.is_none() && (x.is_none() || y.is_none()) {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "provide either selector or both x and y",
+                None,
+            ));
+        }
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let expr = HITTEST_JS
+            .replace("@@SEL@@", &js_escape(&selector.unwrap_or_default()))
+            .replace(
+                "@@PX@@",
+                &x.map(|v| v.to_string()).unwrap_or_else(|| "null".into()),
+            )
+            .replace(
+                "@@PY@@",
+                &y.map(|v| v.to_string()).unwrap_or_else(|| "null".into()),
+            );
+        let r = page
+            .eval(&expr)
+            .await
+            .map_err(rmcp::model::ErrorData::internal_error)?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_hit_test",
+            Some(&page_id),
+            serde_json::json!({ "selector": selector, "x": x, "y": y }),
+        );
+        Ok(json_result(r))
+    }
+
+    #[tool(
         description = "GEETEST ICON-CLICK SOLVER: solve the GeeTest v3 word-click captcha (characters on a photo, click in the strip's order) from the live page. Fetches the challenge image off the element's background, runs the trained ONNX pair (YOLOv8s char detection + siamese order matching, 100% local CPU, ~0.5s), and returns click targets in page coordinates plus the raw boxes. Call AFTER the challenge popup is open. Then click each 'click' point via page_drag and press the geetest confirm button. Returns JSON {clicks: [{x, y}, ...] in page px, boxes_raw: [[x, y], ...] in image px, rect: {...}, img: {w, h}}."
     )]
     async fn page_geetest_click(
@@ -4872,7 +5142,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Evaluate a JavaScript expression in the page's main frame and return its JSON value. Read-only introspection is safest; treat results of mutations with care."
+        description = "Evaluate a JavaScript expression in the page's main frame and return its JSON value. Read-only introspection is safest; treat results of mutations with care. Self-heals common LLM mistakes (top-level `return` wrapped in an IIFE, over-escaped \\\"quotes\\\" de-escaped) — a healed result comes back as {healed, fix, value} so you see what was changed; unfixable syntax errors still fail with the original error."
     )]
     async fn page_eval(
         &self,
@@ -4893,29 +5163,66 @@ impl GhostcloakServer {
         // Hard 20s cap: an expression like `while(true){}` otherwise blocks
         // the call for ~100s (engine default) and leaves the page's event
         // loop busy. Fail fast with an actionable message instead.
-        let value = tokio::time::timeout(
+        let mut healed: Option<&'static str> = None;
+        let mut expr = expression.clone();
+        let value = match tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            page.evaluate(&expression),
+            page.evaluate(&expr),
         )
         .await
-        .map_err(|_| {
-            rmcp::model::ErrorData::internal_error(
-                "page_eval timed out after 20s — the expression probably blocks (infinite loop); \
-                 avoid while(true)/for(;;) and prefer incremental, awaitable expressions. \
-                 NOTE: the page may stay unresponsive until the loop ends.",
-                None,
-            )
-        })?
-        .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                match heal_js(&expr, &msg) {
+                    Some((fx, how)) => {
+                        let retry = tokio::time::timeout(
+                            std::time::Duration::from_secs(20),
+                            page.evaluate(&fx),
+                        )
+                        .await;
+                        match retry {
+                            Ok(Ok(v2)) => {
+                                healed = Some(how);
+                                expr = fx;
+                                v2
+                            }
+                            _ => {
+                                return Err(rmcp::model::ErrorData::internal_error(msg, None));
+                            }
+                        }
+                    }
+                    None => {
+                        return Err(rmcp::model::ErrorData::internal_error(msg, None));
+                    }
+                }
+            }
+            Err(_) => {
+                return Err(rmcp::model::ErrorData::internal_error(
+                    "page_eval timed out after 20s — the expression probably blocks (infinite loop); \
+                     avoid while(true)/for(;;) and prefer incremental, awaitable expressions. \
+                     NOTE: the page may stay unresponsive until the loop ends.",
+                    None,
+                ));
+            }
+        };
         let _ = self.recorder.record(
             &session_id,
             "page_eval",
             Some(&page_id),
-            serde_json::json!({ "len": expression.len() }),
+            serde_json::json!({ "len": expression.len(), "healed": healed.is_some() }),
         );
-        Ok(text_result(
-            serde_json::to_string(&value).unwrap_or_default(),
-        ))
+        Ok(match healed {
+            Some(fix) => text_result(
+                serde_json::to_string(&serde_json::json!({
+                    "healed": true,
+                    "fix": fix,
+                    "value": value,
+                }))
+                .unwrap_or_default(),
+            ),
+            None => text_result(serde_json::to_string(&value).unwrap_or_default()),
+        })
     }
 
     #[tool(
@@ -4927,6 +5234,9 @@ impl GhostcloakServer {
             session_id,
             page_id,
             full_page,
+            max_dim,
+            format,
+            jpeg_quality,
         }): Parameters<PageScreenshotParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
         let session = self
@@ -4937,10 +5247,48 @@ impl GhostcloakServer {
             .page(&page_id)
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
-        let png = page
+        let mut png = page
             .screenshot(full_page.unwrap_or(false))
             .await
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let orig_bytes = png.len();
+        // Optional post-process (from chrome-devtools/browser-use): downscale + re-encode.
+        let fmt = format.as_deref().unwrap_or("png").to_ascii_lowercase();
+        if fmt != "png" && fmt != "jpeg" && fmt != "jpg" {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "format must be png or jpeg",
+                None,
+            ));
+        }
+        if max_dim.is_some() || fmt == "jpeg" || fmt == "jpg" {
+            let img = image::load_from_memory(&png)
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            let img = match max_dim {
+                Some(md) if md >= 16 => {
+                    let (w, h) = (img.width(), img.height());
+                    let scale = (md as f32 / w.max(h) as f32).min(1.0);
+                    if scale < 1.0 {
+                        let nw = ((w as f32 * scale).round() as u32).max(1);
+                        let nh = ((h as f32 * scale).round() as u32).max(1);
+                        img.resize(nw, nh, image::imageops::FilterType::Triangle)
+                    } else {
+                        img
+                    }
+                }
+                _ => img,
+            };
+            let mut buf = Vec::new();
+            if fmt == "jpeg" || fmt == "jpg" {
+                let q = jpeg_quality.unwrap_or(80).clamp(1, 100);
+                let mut w = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, q);
+                w.encode_image(&img)
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            } else {
+                img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            }
+            png = buf;
+        }
         let path = self
             .recorder
             .record_screenshot(&session_id, &page_id, &png)
@@ -4951,6 +5299,8 @@ impl GhostcloakServer {
             serde_json::to_string_pretty(&serde_json::json!({
                 "file": path.to_string_lossy(),
                 "bytes": std::path::Path::new(&path).metadata().map(|m| m.len()).unwrap_or_default(),
+                "original_bytes": orig_bytes,
+                "format": if fmt == "jpg" { "jpeg" } else { fmt.as_str() },
             }))
             .unwrap_or_default(),
         ))

@@ -297,6 +297,22 @@ struct WaitForParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct WaitForTextParams {
+    session_id: String,
+    page_id: String,
+    /// Substring to wait for — matched against visible text (body innerText)
+    /// plus the document title, e.g. "Order confirmed" or "404". Use this
+    /// instead of page_wait_for when you know the CONTENT, not a selector.
+    text: String,
+    /// Timeout in milliseconds (default 10000, capped at 60000).
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    /// Case-sensitive match (default false = case-insensitive).
+    #[serde(default)]
+    case_sensitive: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct UploadParams {
     session_id: String,
     page_id: String,
@@ -321,6 +337,27 @@ struct PageEvalParams {
     page_id: String,
     /// JavaScript expression; the JSON-ified result is returned.
     expression: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BrowserExecParams {
+    session_id: String,
+    page_id: String,
+    /// JavaScript program (statements, loops, multiple lines — not just an
+    /// expression). Helpers are pre-imported: print()/log() (captured into
+    /// output), ns (persistent scratch object, see below), page_info(),
+    /// $(sel)/$$(sel), click_at_xy(x,y), type_text(sel,text), goto_url(url),
+    /// new_tab(url), wait_for_load(), list_tabs(), js(expr). Navigation and
+    /// real clicks are QUEUED and executed by the server after your script
+    /// returns, so inspect-then-act works in ONE call. State: put scratch
+    /// data in `ns` — it persists server-side across calls AND across page
+    /// navigation (page globals are wiped on goto_url). Top-level vars in
+    /// the script do NOT persist. Calls are serialized (one script at a
+    /// time), like browser-use's exec lock.
+    code: String,
+    /// Clear the persisted ns object before running (default false).
+    #[serde(default)]
+    reset_ns: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -375,6 +412,16 @@ struct PageClickParams {
     page_id: String,
     /// CSS selector.
     selector: String,
+    /// Mouse button: "left" (default) or "right" (fires contextmenu —
+    /// for custom context menus; press Escape afterwards if the browser's
+    /// native menu opens).
+    #[serde(default)]
+    button: Option<String>,
+    /// Click count: 1 (default) or 2 (double-click, fires dblclick with
+    /// detail=2). Real engine mouse events, with a human ~90ms pause
+    /// between the two clicks.
+    #[serde(default)]
+    click_count: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -5364,7 +5411,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Click an element by CSS selector. For form controls (buttons, inputs), uses a JS click; for links and other elements, dispatches real mouse events at coordinates. Prefer page_click_ref when you have a page_a11y ref — it scrolls into view first and is more reliable on web-component UIs. Returns 'ok' on success."
+        description = "Click an element by CSS selector. For form controls (buttons, inputs), uses a JS click; for links and other elements, dispatches real mouse events at coordinates. Prefer page_click_ref when you have a page_a11y ref — it scrolls into view first and is more reliable on web-component UIs. VARIANTS: button='right' fires a contextmenu with REAL mouse events (custom context menus; if the browser's native menu opens, close it with page_press Escape) — use it for right-click menus, 'open in new tab' items, editor contexts. click_count=2 fires a real double-click (click detail=2 + dblclick, human ~90ms gap between clicks) — for inline rename, map/file selects, text selection. Form controls fall back to DOM events (engine-level mouse into form fields is unsafe on this build). Returns 'ok' on success."
     )]
     async fn page_click(
         &self,
@@ -5372,8 +5419,28 @@ impl GhostcloakServer {
             session_id,
             page_id,
             selector,
+            button,
+            click_count,
         }): Parameters<PageClickParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let button = button.unwrap_or_else(|| "left".to_string());
+        let btn_code: u8 = match button.as_str() {
+            "left" => 0,
+            "right" => 2,
+            other => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!("button must be \"left\" or \"right\" (got {other:?})"),
+                    None,
+                ));
+            }
+        };
+        let click_count = click_count.unwrap_or(1);
+        if click_count == 0 || click_count > 2 {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "click_count must be 1 or 2 (2 = double-click)",
+                None,
+            ));
+        }
         let session = self
             .session(&session_id)
             .await
@@ -5382,14 +5449,20 @@ impl GhostcloakServer {
             .page(&page_id)
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
-        page.click(&selector)
-            .await
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        if btn_code == 0 && click_count == 1 {
+            page.click(&selector)
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        } else {
+            page.click_variant(&selector, btn_code, click_count)
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        }
         let _ = self.recorder.record(
             &session_id,
             "page_click",
             Some(&page_id),
-            serde_json::json!({ "selector": selector }),
+            serde_json::json!({ "selector": selector, "button": button, "click_count": click_count }),
         );
         Ok(text_result("ok"))
     }

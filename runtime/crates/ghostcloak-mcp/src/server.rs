@@ -5499,31 +5499,29 @@ impl GhostcloakServer {
             .replace("@@CODE@@", &code_json);
         // Hard 20s cap, same as page_eval: a while(true) in the script must
         // not wedge the call for the engine's ~100s default.
-        let raw = match tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            page.evaluate(&program),
-        )
-        .await
-        {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                return Err(rmcp::model::ErrorData::internal_error(e.to_string(), None));
-            }
-            Err(_) => {
-                return Err(rmcp::model::ErrorData::internal_error(
-                    "browser_exec timed out after 20s — the program probably blocks (infinite \
+        let raw =
+            match tokio::time::timeout(std::time::Duration::from_secs(20), page.evaluate(&program))
+                .await
+            {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    return Err(rmcp::model::ErrorData::internal_error(e.to_string(), None));
+                }
+                Err(_) => {
+                    return Err(rmcp::model::ErrorData::internal_error(
+                        "browser_exec timed out after 20s — the program probably blocks (infinite \
                      loop); avoid while(true)/for(;;) and prefer short, terminating scripts. \
                      NOTE: the page may stay unresponsive until the loop ends.",
-                    None,
-                ));
-            }
-        };
+                        None,
+                    ));
+                }
+            };
         let parsed = raw
             .as_str()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .unwrap_or_else(|| {
-                serde_json::json!({ "output": raw.to_string(), "value": null, "error": null })
-            });
+            .unwrap_or_else(
+                || serde_json::json!({ "output": raw.to_string(), "value": null, "error": null }),
+            );
         // Persist the scratch namespace (size-capped so a runaway script
         // can't grow the server's state without bound).
         if let Some(ns_val) = parsed.get("ns") {
@@ -5543,8 +5541,14 @@ impl GhostcloakServer {
         let mut actions: Vec<serde_json::Value> = Vec::new();
         if let Some(queued) = parsed.get("acts").and_then(serde_json::Value::as_array) {
             for act in queued.iter().take(8) {
-                let op = act.get("op").and_then(serde_json::Value::as_str).unwrap_or("");
-                let url = act.get("url").and_then(serde_json::Value::as_str).unwrap_or("");
+                let op = act
+                    .get("op")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let url = act
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 let scheme_ok = {
                     let u = url.trim().to_ascii_lowercase();
                     u.starts_with("http://")
@@ -5609,8 +5613,14 @@ impl GhostcloakServer {
                         }
                     }
                     "click" => {
-                        let x = act.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                        let y = act.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                        let x = act
+                            .get("x")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0);
+                        let y = act
+                            .get("y")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0);
                         let name = format!("gfx_bexec_click_{}", actions.len());
                         match Self::hc_click_xy(&page, x, y, &name).await {
                             Ok(()) => actions.push(serde_json::json!({
@@ -5630,10 +5640,7 @@ impl GhostcloakServer {
                 }
             }
         }
-        let has_error = parsed
-            .get("error")
-            .map(|e| !e.is_null())
-            .unwrap_or(false);
+        let has_error = parsed.get("error").map(|e| !e.is_null()).unwrap_or(false);
         let _ = self.recorder.record(
             &session_id,
             "browser_exec",

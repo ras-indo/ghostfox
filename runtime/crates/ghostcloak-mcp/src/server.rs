@@ -871,7 +871,9 @@ fn heal_js(src: &str, err: &str) -> Option<(String, &'static str)> {
         || err.contains("missing ) after argument list")
         || err.contains("Illegal return statement")
         // Juggler/Firefox wording for a top-level `return`
-        || err.contains("return not in function");
+        || err.contains("return not in function")
+        // Juggler/Firefox wording for over-escaped quotes
+        || err.contains("invalid escape sequence");
     if !syntax {
         return None;
     }
@@ -885,8 +887,9 @@ fn heal_js(src: &str, err: &str) -> Option<(String, &'static str)> {
             "wrapped top-level return in an IIFE",
         ));
     }
-    // 2. over-escaped double quotes: `\"text\"` as a whole expression
-    if src.contains("\\\"") {
+    // 2. over-escaped double quotes: `\"text\"` as a whole expression —
+    // also fires on Juggler's "invalid escape sequence"
+    if src.contains("\\\"") && (err.contains("invalid escape sequence") || err.contains("Unexpected token")) {
         let fixed = src.replace("\\\"", "\"");
         if fixed.contains('"') {
             return Some((fixed, "removed over-escaping of double quotes"));

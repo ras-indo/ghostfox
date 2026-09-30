@@ -195,7 +195,9 @@ pub trait PageHandle: Send + Sync {
             .await?;
         match res.as_str() {
             Some("OK") => Ok(()),
-            _ => Err(crate::error::GhostError::PageOp("selector not found".into())),
+            _ => Err(crate::error::GhostError::PageOp(
+                "selector not found".into(),
+            )),
         }
     }
     async fn type_text(&self, selector: &str, text: &str) -> Result<()>;

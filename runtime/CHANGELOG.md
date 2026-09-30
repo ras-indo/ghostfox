@@ -5,6 +5,16 @@ All notable changes to ghostcloak will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`page_click` variants** — `button: "right"` (contextmenu) and
+  `click_count: 2` (double-click) with REAL engine mouse events on Camoufox
+  (isTrusted; ~90ms human gap between double-clicks), DOM-dispatch fallback
+  for form controls / other engines via the new `PageHandle::click_variant`
+  trait method (default impl = portable JS dispatch).
+
 ## [0.8.0] — 2026-09-27
 
 ### Added

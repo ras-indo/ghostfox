@@ -141,6 +141,40 @@ pub struct PageSnapshot {
     pub captured_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Build the JS expression for a DOM-level click variant (right-click /
+/// double-click via dispatched DOM events). isTrusted=false — engines with a
+/// real mouse should prefer engine-level dispatch; this is the portable path
+/// (default trait impl, form controls, navigation-churn fallback).
+pub fn dom_click_variant_js(selector: &str, button: u8, count: u8) -> String {
+    let sel = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into());
+    format!(
+        "(() => {{ const el = document.querySelector({sel}); if (!el) return 'MISSING'; \
+         el.scrollIntoView({{block:'center'}}); \
+         const r = el.getBoundingClientRect(); \
+         const x = r.x + r.width/2, y = r.y + r.height/2; \
+         const mk = (type, b, detail, buttons) => new MouseEvent(type, \
+           {{bubbles:true, cancelable:true, composed:true, view:window, \
+             clientX:x, clientY:y, button:b, buttons:buttons, detail:detail}}); \
+         if ({btn} === 2) {{ \
+           el.dispatchEvent(mk('mousedown',2,1,2)); \
+           el.dispatchEvent(mk('mouseup',2,1,0)); \
+           el.dispatchEvent(mk('contextmenu',2,1,0)); \
+         }} else {{ \
+           const n = {cnt}; \
+           for (let i = 1; i <= n; i++) {{ \
+             el.dispatchEvent(mk('mousedown',0,i,1)); \
+             el.dispatchEvent(mk('mouseup',0,i,0)); \
+             el.dispatchEvent(mk('click',0,i,0)); \
+           }} \
+           if (n === 2) el.dispatchEvent(mk('dblclick',0,2,0)); \
+         }} \
+         return 'OK'; }})()",
+        sel = sel,
+        btn = button,
+        cnt = count,
+    )
+}
+
 /// A live handle to one page (tab) inside an engine instance.
 #[async_trait]
 pub trait PageHandle: Send + Sync {
@@ -151,6 +185,19 @@ pub trait PageHandle: Send + Sync {
     }
     async fn snapshot(&self) -> Result<PageSnapshot>;
     async fn click(&self, selector: &str) -> Result<()>;
+    /// Click variant: `button` 0=left, 2=right; `count` 1 or 2 (2 = double
+    /// click). Default implementation dispatches DOM events via JS — portable
+    /// across engines but isTrusted=false (anti-bot gates may reject it).
+    /// Engines with a real mouse override this with engine-level dispatch.
+    async fn click_variant(&self, selector: &str, button: u8, count: u8) -> Result<()> {
+        let res = self
+            .evaluate(&dom_click_variant_js(selector, button, count))
+            .await?;
+        match res.as_str() {
+            Some("OK") => Ok(()),
+            _ => Err(crate::error::GhostError::PageOp("selector not found".into())),
+        }
+    }
     async fn type_text(&self, selector: &str, text: &str) -> Result<()>;
     async fn evaluate(&self, expression: &str) -> Result<serde_json::Value>;
     async fn url(&self) -> Result<String>;

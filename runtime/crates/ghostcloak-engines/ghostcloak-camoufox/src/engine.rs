@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ghostcloak_core::engine::{Engine, EngineKind, LaunchOptions, PageHandle, PageSnapshot};
+use ghostcloak_core::engine::{
+    dom_click_variant_js, Engine, EngineKind, LaunchOptions, PageHandle, PageSnapshot,
+};
 use ghostcloak_core::error::{GhostError, Result};
 use ghostcloak_fingerprint::Identity;
 
@@ -1807,6 +1809,126 @@ impl PageHandle for CamoufoxPage {
             sel = serde_json::to_string(selector).unwrap_or_default()
         );
         let res = self.evaluate(&js_click).await?;
+        match res.as_str() {
+            Some("OK") => Ok(()),
+            _ => Err(GhostError::PageOp("selector not found".into())),
+        }
+    }
+
+    async fn click_variant(&self, selector: &str, button: u8, count: u8) -> Result<()> {
+        // Plain left single-click: the battle-tested click() path.
+        if button == 0 && count <= 1 {
+            return self.click(selector).await;
+        }
+        // Locate first — form controls get DOM events (mouse dispatch into
+        // form fields has been observed to kill this build's content
+        // channel), everything else gets REAL engine mouse events
+        // (isTrusted — what anti-bot gates expect).
+        let locate = format!(
+            "(() => {{ const el = document.querySelector({sel}); if (!el) return 'MISSING'; \
+             const tag = el.tagName.toLowerCase(); \
+             const isForm = tag === 'input' || tag === 'button' || el.closest('form') !== null; \
+             return isForm ? 'FORM' : 'SKIP'; }})()",
+            sel = serde_json::to_string(selector).unwrap_or_default()
+        );
+        let mode = match self.evaluate(&locate).await {
+            Ok(v) => v.as_str().unwrap_or("MISSING").to_string(),
+            // Channel death during the probe — the DOM path is the safe one.
+            Err(_) => "FORM".to_string(),
+        };
+        if mode == "MISSING" {
+            return Err(GhostError::PageOp("selector not found".into()));
+        }
+        if mode == "SKIP" {
+            // Same coordinate probe as click(): scroll into view, rect center.
+            let expr = format!(
+                "(() => {{ const el = document.querySelector({sel}); if (!el) return null; \
+                 el.scrollIntoView({{block: 'center'}}); \
+                 const r = el.getBoundingClientRect(); \
+                 return JSON.stringify({{x: r.x + r.width/2, y: r.y + r.height/2}}); }})()",
+                sel = serde_json::to_string(selector).unwrap_or_default()
+            );
+            let pos: Option<(f64, f64)> = match self.evaluate(&expr).await {
+                Ok(v) => v.as_str().and_then(|s| {
+                    serde_json::from_str::<serde_json::Value>(s)
+                        .ok()
+                        .and_then(|o| Some((o.get("x")?.as_f64()?, o.get("y")?.as_f64()?)))
+                }),
+                Err(_) => None,
+            };
+            if let Some((x, y)) = pos {
+                let sid = {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    loop {
+                        match self.session_id().await {
+                            Ok(s) => break s,
+                            Err(_) if std::time::Instant::now() < deadline => {
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                };
+                // (type, button, buttons, clickCount). DOM semantics:
+                // `buttons` is the state AFTER the event (0 on mouseup) —
+                // same rule dispatch_mouse documents for pointer capture.
+                let seq: &[(&str, u32, u32, u32)] = if button == 2 {
+                    &[("mousedown", 2, 2, 1), ("mouseup", 2, 0, 1)]
+                } else if count == 2 {
+                    &[
+                        ("mousedown", 0, 1, 1),
+                        ("mouseup", 0, 0, 1),
+                        ("mousedown", 0, 1, 2),
+                        ("mouseup", 0, 0, 2),
+                    ]
+                } else {
+                    &[("mousedown", 0, 1, 1), ("mouseup", 0, 0, 1)]
+                };
+                let mut dispatched = true;
+                for (ty, b, buttons, cc) in seq {
+                    match self
+                        .conn
+                        .request_session(
+                            "Page.dispatchMouseEvent",
+                            serde_json::json!({
+                                "type": *ty,
+                                "button": *b,
+                                "x": x,
+                                "y": y,
+                                "modifiers": 0,
+                                "clickCount": *cc,
+                                "buttons": *buttons,
+                            }),
+                            Some(&sid),
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            // Human pause between the two clicks of a double
+                            // click (~90ms — under the OS double-click threshold).
+                            if count == 2 && button == 0 && *ty == "mouseup" && *cc == 1 {
+                                tokio::time::sleep(std::time::Duration::from_millis(90)).await;
+                            }
+                        }
+                        // A mouseup response can legitimately vanish when the
+                        // event triggers navigation — it landed.
+                        Err(_) if *ty == "mouseup" => break,
+                        Err(_) => {
+                            dispatched = false;
+                            break;
+                        }
+                    }
+                }
+                if dispatched {
+                    return Ok(());
+                }
+            }
+        }
+        // DOM fallback: form controls, or mouse dispatch failed mid-churn.
+        let res = self
+            .evaluate(&dom_click_variant_js(selector, button, count))
+            .await?;
         match res.as_str() {
             Some("OK") => Ok(()),
             _ => Err(GhostError::PageOp("selector not found".into())),

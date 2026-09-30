@@ -3719,16 +3719,16 @@ impl GhostcloakServer {
                 &max_bytes.unwrap_or(200_000).min(5_000_000).to_string(),
             );
         let r = page
-            .eval(&expr)
+            .evaluate(&expr)
             .await
-            .map_err(rmcp::model::ErrorData::internal_error)?;
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         let _ = self.recorder.record(
             &session_id,
             "page_get_html",
             Some(&page_id),
             serde_json::json!({}),
         );
-        Ok(json_result(r))
+        Ok(text_result(serde_json::to_string(&r).unwrap_or_default()))
     }
 
     #[tool(
@@ -3775,16 +3775,16 @@ impl GhostcloakServer {
                 &y.map(|v| v.to_string()).unwrap_or_else(|| "null".into()),
             );
         let r = page
-            .eval(&expr)
+            .evaluate(&expr)
             .await
-            .map_err(rmcp::model::ErrorData::internal_error)?;
+            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         let _ = self.recorder.record(
             &session_id,
             "page_hit_test",
             Some(&page_id),
             serde_json::json!({ "selector": selector, "x": x, "y": y }),
         );
-        Ok(json_result(r))
+        Ok(text_result(serde_json::to_string(&r).unwrap_or_default()))
     }
 
     #[tool(
@@ -5164,7 +5164,7 @@ impl GhostcloakServer {
         // the call for ~100s (engine default) and leaves the page's event
         // loop busy. Fail fast with an actionable message instead.
         let mut healed: Option<&'static str> = None;
-        let mut expr = expression.clone();
+        let expr = expression.clone();
         let value = match tokio::time::timeout(
             std::time::Duration::from_secs(20),
             page.evaluate(&expr),
@@ -5183,8 +5183,8 @@ impl GhostcloakServer {
                         .await;
                         match retry {
                             Ok(Ok(v2)) => {
+                                let _ = fx;
                                 healed = Some(how);
-                                expr = fx;
                                 v2
                             }
                             _ => {

@@ -87,7 +87,10 @@ the native solvers above run fully local.
 **Eyes for agents — `page_a11y`.** One call returns every visible interactive
 element with a stable ref, semantic role, accessible name, live value —
 **piercing shadow DOM and same-origin iframes**, so web-component UIs
-(Reddit, modern frameworks) are fully visible. The snapshot also reports
+(Reddit, modern frameworks) are fully visible. Invisible text planted in
+names/values (`font-size:0`, `opacity:0`, `aria-hidden`) is **stripped
+before the agent sees it** (prompt-injection defense) and reported via
+`stripped`/`stripped_content`. The snapshot also reports
 **`login_state`** (logged-in / logged-out / unknown), page URL and title —
 agents check session health before acting, not after failing.
 

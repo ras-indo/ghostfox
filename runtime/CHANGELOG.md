@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default, 200ms poll, returns `{found, waited_ms}` — the content-based
   counterpart to `page_wait_for` (selector-based).
 
+### Changed
+
+- **`page_a11y` content sanitization** (ROADMAP v0.5 prompt-injection
+  defense) — hidden text (`font-size:0`, `opacity<0.01`, `visibility:hidden`,
+  `aria-hidden` subtrees) is now STRIPPED from innerText-derived element
+  `name`/`value` instead of reaching the agent, and reported: per-element
+  `stripped` (invisible chars removed) + snapshot `stripped_content` (count
+  of affected elements).
+
 ## [0.8.0] — 2026-09-27
 
 ### Added

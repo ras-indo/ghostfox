@@ -50,8 +50,9 @@
        instructions", "download from", "enter your") marked as
        `"suspicious_content": true`
        *(shipped: `suspicious_elements` in `page_a11y`)*
-- [ ] **Content sanitization** — `page_a11y` strips hidden/invisible text from
+- [x] **Content sanitization** — `page_a11y` strips hidden/invisible text from
        `name` and `value` fields, reports what was stripped
+       *(shipped: `stripped` per element + `stripped_content` in `page_a11y`)*
 
 **Milestone: Ghostfox agents are behaviorally indistinguishable from humans.**
 

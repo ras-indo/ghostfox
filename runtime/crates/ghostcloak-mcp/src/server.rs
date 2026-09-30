@@ -881,7 +881,15 @@ impl GhostcloakServer {
 /// blank document: page_open/page_back/page_reload used to return before
 /// the DOM was parseable, failing every follow-up call.
 async fn wait_for_dom(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) {
+    // Overall deadline, not just per-iteration: a dead execution context
+    // makes each evaluate() burn up to ~35s in retry backoff, so "60 tries"
+    // alone can hold a caller (and exec_lock) hostage for half an hour.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(12);
     for _ in 0..60 {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
         match page.evaluate("!!document.body").await {
             Ok(v) if v.as_bool() == Some(true) => break,
             _ => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
@@ -5561,18 +5569,38 @@ impl GhostcloakServer {
                         "op": "goto", "url": url, "ok": false,
                         "error": "URL scheme not allowed — use http(s)://",
                     })),
-                    "goto" => match page.navigate(url).await {
-                        Ok(()) => {
-                            wait_for_dom(&page).await;
-                            let landed = settled_url(&page).await;
-                            actions.push(
-                                serde_json::json!({ "op": "goto", "url": landed, "ok": true }),
-                            );
+                    "goto" => {
+                        // Same-document jump (fragment-only change) NEVER
+                        // recreates the execution context: navigate() clears
+                        // the cached context id and the pump then waits for
+                        // an event that never arrives — evaluate falls back
+                        // to a frame id juggler rejects, wedging exec_lock
+                        // for ~30min (wait_for_dom churn). Do it in-page.
+                        let cur = page.url().await.unwrap_or_default();
+                        let strip_frag =
+                            |u: &str| u.split('#').next().unwrap_or("").to_string();
+                        let same_doc =
+                            !cur.is_empty() && strip_frag(&cur) == strip_frag(url);
+                        let nav_res = if same_doc {
+                            page.evaluate(&format!("location.href = {url:?}; 'ok'"))
+                                .await
+                                .map(|_| ())
+                        } else {
+                            page.navigate(url).await
+                        };
+                        match nav_res {
+                            Ok(()) => {
+                                wait_for_dom(&page).await;
+                                let landed = settled_url(&page).await;
+                                actions.push(
+                                    serde_json::json!({ "op": "goto", "url": landed, "ok": true }),
+                                );
+                            }
+                            Err(e) => actions.push(serde_json::json!({
+                                "op": "goto", "url": url, "ok": false, "error": e.to_string(),
+                            })),
                         }
-                        Err(e) => actions.push(serde_json::json!({
-                            "op": "goto", "url": url, "ok": false, "error": e.to_string(),
-                        })),
-                    },
+                    }
                     "new_tab" if !scheme_ok => actions.push(serde_json::json!({
                         "op": "new_tab", "url": url, "ok": false,
                         "error": "URL scheme not allowed — use http(s)://",

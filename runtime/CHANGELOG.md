@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default, 200ms poll, returns `{found, waited_ms}` — the content-based
   counterpart to `page_wait_for` (selector-based).
 
+### Fixed
+
+- **`browser_exec` same-document `goto_url` wedged the exec lock** — a
+  fragment-only jump never recreates the execution context, so navigate()'s
+  context clear left evaluate() churning (~30min of retries) and every
+  subsequent browser_exec call blocked behind `exec_lock`. Fragment-only
+  URLs now jump in-page (`location.href`), and `wait_for_dom` got an
+  overall 12s deadline instead of an iteration count alone.
+
 ### Changed
 
 - **`page_a11y` content sanitization** (ROADMAP v0.5 prompt-injection

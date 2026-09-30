@@ -1681,9 +1681,8 @@ async fn settle_context(page: &CamoufoxPage) {
 /// so compare everything before the first '#'. An empty side (parse failure)
 /// conservatively reports "not same document" — the old reset path.
 fn same_document(current: &str, target: &str) -> bool {
-    let strip = |u: &str| u.split('#').next().unwrap_or("");
-    let a = strip(current);
-    let b = strip(target);
+    let a = current.split('#').next().unwrap_or("");
+    let b = target.split('#').next().unwrap_or("");
     !a.is_empty() && a == b
 }
 

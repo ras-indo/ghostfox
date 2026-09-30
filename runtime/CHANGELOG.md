@@ -68,14 +68,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   survives to anchor the fallback); busy-page timeouts never touch the
   pins (same-document navigations emit no replacement events, so clearing
   there would starve the retry loop) and stop after two attempts instead
-  of spinning for minutes; with BOTH pins empty, evaluate with NO
-  `executionContextId` — juggler's default context exists whenever the
-  session does, so recovery needs NO event at all (this covers event-storm
-  losses: the juggler broadcast channel grew 256 → 4096 because a Lagged
-  overflow silently dropped `executionContextCreated` and left the handle
-  pinned to nothing). Falls back to the freshly pinned frame id, and
-  finally returns guidance ("reopen with page_open") instead of raw
-  channel noise.
+  of spinning for minutes; with BOTH pins empty there is NO event-free
+  primitive — juggler REQUIRES `executionContextId` ("Expected <root>…
+  to be |string|") and does not implement `Runtime.enable` — so evaluate
+  now forces ONE `Page.reload` self-heal instead, which deterministically
+  mints fresh `executionContextCreated` events the pump adopts (in-page
+  state is lost, but the page stays usable — better than a dead handle;
+  this covers event-storm starvation: the juggler broadcast channel grew
+  256 → 4096 because a Lagged overflow silently dropped
+  `executionContextCreated` and left the handle pinned to nothing).
+  Falls back to the freshly pinned frame id, and finally returns guidance
+  ("reopen with page_open") instead of raw channel noise.
+- **Same-document `Page.navigate` no longer strands the handle** —
+  navigate() used to unconditionally clear the context pin and wait 8s for
+  a successor event; a hash/query-only jump keeps the SAME document, so
+  juggler may emit destruction with NO creation event and the wait timed
+  out with pins empty — every later evaluate then starved (the
+  `mainframe-11` signature). navigate() now compares `location.href`
+  against the target FIRST (pins still valid) and, on a same-document
+  move, keeps the pins and skips the wait entirely (also removing the
+  silent 8s penalty per hash-goto). `settle_context` (back/forward/reload)
+  gained the same safety: when the wait times out it adopts the surviving
+  frame id, since juggler resolves a frame's default context from its id.
+  All pin-clearing pump arms (detach/crash/lagged/destroyed/cleared) now
+  log which event cleared what, so the next regression is traceable in
+  one debug run.
 - **`browser_exec` same-document `goto_url` wedged the exec lock** — a
   fragment-only jump never recreates the execution context, so navigate()'s
   context clear left evaluate() churning (~30min of retries) and every

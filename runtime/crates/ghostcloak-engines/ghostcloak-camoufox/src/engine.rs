@@ -504,6 +504,7 @@ impl CamoufoxEngine {
                                         msg.pointer("/params/targetId").and_then(|v| v.as_str())
                                     {
                                         if tid == handle2.target_id {
+                                            tracing::debug!(target: "ghostcloak::camoufox", "pump: full pin clear (detachedFromTarget)");
                                             *handle2.session_id.lock().await = None;
                                             *handle2.execution_context_id.lock().await = None;
                                             // Frame ids die with the session —
@@ -515,6 +516,7 @@ impl CamoufoxEngine {
                                     }
                                 }
                                 Some("Inspector.targetCrashed") => {
+                                    tracing::debug!(target: "ghostcloak::camoufox", "pump: full pin clear (targetCrashed)");
                                     handle2.crashed.store(true, Ordering::SeqCst);
                                     *handle2.execution_context_id.lock().await = None;
                                     *handle2.frame_id.lock().await = None;
@@ -639,6 +641,45 @@ mod frame_id_tests {
         assert!(!is_main_frame_id("mainframex"));
         assert!(!is_main_frame_id("mainframe-11abc"));
         assert!(!is_main_frame_id("iframe-1"));
+    }
+}
+
+#[cfg(test)]
+mod same_document_tests {
+    use super::same_document;
+
+    #[test]
+    fn fragment_moves_are_same_document() {
+        assert!(same_document(
+            "http://127.0.0.1:8899/ctxnav.html",
+            "http://127.0.0.1:8899/ctxnav.html#tab2"
+        ));
+        assert!(same_document(
+            "http://127.0.0.1:8899/ctxnav.html#tab1",
+            "http://127.0.0.1:8899/ctxnav.html#tab2"
+        ));
+        assert!(same_document("file:///a/b.html#x", "file:///a/b.html"));
+    }
+
+    #[test]
+    fn real_navigations_are_cross_document() {
+        assert!(!same_document(
+            "http://127.0.0.1:8899/ctxnav.html",
+            "http://127.0.0.1:8899/ctxnav_a.html#top"
+        ));
+        assert!(!same_document(
+            "http://127.0.0.1:8899/ctxnav.html?x=1",
+            "http://127.0.0.1:8899/ctxnav.html?x=2"
+        ));
+        assert!(!same_document("http://127.0.0.1:8899/a.html", "about:blank"));
+    }
+
+    #[test]
+    fn empty_or_unparseable_sides_are_conservative() {
+        // Parse failures must fall through to the old reset path.
+        assert!(!same_document("", "http://x/y.html"));
+        assert!(!same_document("http://x/y.html", ""));
+        assert!(!same_document("", ""));
     }
 }
 
@@ -937,12 +978,14 @@ impl Engine for CamoufoxEngine {
                                         .and_then(|v| v.as_str());
                                     let mut guard = handle2.execution_context_id.lock().await;
                                     if guard.as_deref() == dead {
+                                        tracing::debug!(target: "ghostcloak::camoufox", "pump: ctx pin cleared (executionContextDestroyed)");
                                         *guard = None;
                                     }
                                 }
                                 // Navigation wipes all contexts: drop the
                                 // stale id so evaluate waits for the new one.
                                 Some("Runtime.executionContextsCleared") => {
+                                    tracing::debug!(target: "ghostcloak::camoufox", "pump: ctx pin cleared (executionContextsCleared)");
                                     *handle2.execution_context_id.lock().await = None;
                                 }
                                 _ => {}
@@ -1154,6 +1197,7 @@ impl Engine for CamoufoxEngine {
                                     msg.pointer("/params/targetId").and_then(|v| v.as_str())
                                 {
                                     if tid == handle2.target_id.as_str() {
+                                        tracing::debug!(target: "ghostcloak::camoufox", "pump: full pin clear (detachedFromTarget, live)");
                                         *handle2.session_id.lock().await = None;
                                         *handle2.execution_context_id.lock().await = None;
                                         *handle2.frame_id.lock().await = None;
@@ -1162,13 +1206,15 @@ impl Engine for CamoufoxEngine {
                                 }
                             }
                             if method == Some("Inspector.targetCrashed") {
+                                tracing::debug!(target: "ghostcloak::camoufox", "pump: full pin clear (targetCrashed, live)");
                                 handle2.crashed.store(true, Ordering::SeqCst);
                                 *handle2.execution_context_id.lock().await = None;
                                 *handle2.frame_id.lock().await = None;
                                 *handle2.main_frame_id.lock().await = None;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::debug!(target: "ghostcloak::camoufox", "pump: {n} events lost (broadcast lagged), ctx pin dropped");
                             // Event storm overflowed the broadcast buffer;
                             // lifecycle events were lost. Drop the cached
                             // context so evaluate waits for the next
@@ -1617,6 +1663,25 @@ async fn settle_context(page: &CamoufoxPage) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    // Timeout with no successor context event (same-document history moves,
+    // lost storm events): adopt the surviving frame id so evaluates keep a
+    // resolvable target instead of starving on empty pins.
+    if page.execution_context_id.lock().await.is_none() {
+        if let Some(f) = page.frame_id.lock().await.clone() {
+            tracing::debug!(target: "ghostcloak::camoufox", "settle_context: adopting frame {f} after wait timeout");
+            *page.execution_context_id.lock().await = Some(f);
+        }
+    }
+}
+
+/// Same-document check for navigate: a fragment never leaves the document,
+/// so compare everything before the first '#'. An empty side (parse failure)
+/// conservatively reports "not same document" — the old reset path.
+fn same_document(current: &str, target: &str) -> bool {
+    let strip = |u: &str| u.split('#').next().unwrap_or("");
+    let a = strip(current);
+    let b = strip(target);
+    !a.is_empty() && a == b
 }
 
 #[async_trait]
@@ -1629,10 +1694,23 @@ impl PageHandle for CamoufoxPage {
     async fn navigate(&self, url: &str) -> Result<()> {
         let sid = self.session_id().await?;
         let frame = self.frame_id.lock().await.clone().unwrap_or_default();
-        // Navigating invalidates the execution context; drop it now so any
-        // concurrent evaluate waits for the fresh one instead of firing at
-        // a dead context id.
-        *self.execution_context_id.lock().await = None;
+        // Same-document moves (hash/query-only) KEEP the live execution
+        // context — juggler may emit context destruction with no successor
+        // creation event, and pre-clearing here would strand every later
+        // evaluate with empty pins (no event is coming to refill them).
+        // Read location.href FIRST, while the pins are still valid.
+        let same_doc = match self.evaluate("location.href").await {
+            Ok(v) => same_document(v.as_str().unwrap_or_default(), url),
+            Err(_) => false,
+        };
+        if same_doc {
+            tracing::debug!(target: "ghostcloak::camoufox", "navigate same-doc fast path (pins kept): {url}");
+        } else {
+            // Navigating invalidates the execution context; drop it now so
+            // any concurrent evaluate waits for the fresh one instead of
+            // firing at a dead context id.
+            *self.execution_context_id.lock().await = None;
+        }
         // Some sites (redirect chains) let the navigate response go missing;
         // the navigation itself still proceeds. Bound the wait and treat a
         // timeout as fire-and-forget rather than an error.
@@ -1640,7 +1718,7 @@ impl PageHandle for CamoufoxPage {
             std::time::Duration::from_secs(15),
             self.conn.request_session(
                 "Page.navigate",
-                serde_json::json!({"frameId": frame, "url": url}),
+                serde_json::json!({ "frameId": frame, "url": url }),
                 Some(&sid),
             ),
         )
@@ -1653,6 +1731,10 @@ impl PageHandle for CamoufoxPage {
             Ok(Err(e)) => Err(e),
             Err(_) => Ok(()), // response lost mid-redirect; navigation continues
         };
+        if same_doc {
+            // The document (and its context) survived — nothing to wait for.
+            return out;
+        }
         // Wait (bounded) for the new page's context before handing control
         // back — callers (MCP page_open) fire evaluate right after.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -1661,6 +1743,15 @@ impl PageHandle for CamoufoxPage {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // Cross-document navigation whose successor context event never
+        // arrived (lost in a storm): adopt the surviving frame id so
+        // evaluates keep a resolvable target instead of starving.
+        if self.execution_context_id.lock().await.is_none() {
+            if let Some(f) = self.frame_id.lock().await.clone() {
+                tracing::debug!(target: "ghostcloak::camoufox", "navigate: context event lost, adopting frame {f}");
+                *self.execution_context_id.lock().await = Some(f);
+            }
         }
         out
     }
@@ -3269,12 +3360,14 @@ impl PageHandle for CamoufoxPage {
         //      context pin for a rejected "id-N", the frame pins TOO when
         //      the frame id itself was the rejected target (proven dead;
         //      the next mainframe-* event re-pins by prefix rule);
-        //   3) with BOTH pins empty, evaluate with NO executionContextId:
-        //      juggler's default context exists whenever the session does —
-        //      recovery that needs NO event at all, covering event-storm
-        //      losses (broadcast Lagged drops executionContextCreated);
+        //   3) with BOTH pins empty there is NO event-free primitive (juggler
+        //      REQUIRES executionContextId and does not implement
+        //      Runtime.enable) — force one Page.reload, which deterministically
+        //      mints fresh context events the pump adopts, at the cost of
+        //      in-page state;
         //   4) give up with guidance instead of raw channel noise.
         let mut timeouts = 0u32;
+        let mut reloaded = false;
         let mut last_error = String::from("no execution context");
         for attempt in 0..6 {
             if self.crashed.load(Ordering::SeqCst) {
@@ -3324,17 +3417,32 @@ impl PageHandle for CamoufoxPage {
                 }
             };
             tracing::debug!(target: "ghostcloak::camoufox", "evaluate attempt {attempt} ctx={target:?} sid={sid}");
-            let params = match &target {
-                Some(id) => serde_json::json!({
-                    "expression": expression,
-                    "executionContextId": id,
-                    "returnByValue": true,
-                }),
-                None => serde_json::json!({
-                    "expression": expression,
-                    "returnByValue": true,
-                }),
+            let Some(target) = target else {
+                // Both pins empty. A params object WITHOUT executionContextId
+                // is rejected outright by juggler ("Expected <root>....
+                // executionContextId to be |string|; found |undefined|") and
+                // Runtime.enable is unsupported — there is no event-free
+                // primitive. Force one document reload: it deterministically
+                // mints fresh context events the pump adopts.
+                if attempt >= 2 && !reloaded {
+                    reloaded = true;
+                    tracing::debug!(target: "ghostcloak::camoufox",
+                        "evaluate: both pins empty at attempt {attempt} — Page.reload self-heal");
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.conn
+                            .request_session("Page.reload", serde_json::json!({}), Some(&sid)),
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                }
+                continue;
             };
+            let params = serde_json::json!({
+                "expression": expression,
+                "executionContextId": target,
+                "returnByValue": true,
+            });
             let result = match self
                 .conn
                 .request_session("Runtime.evaluate", params, Some(&sid))

@@ -5710,14 +5710,12 @@ impl GhostcloakServer {
                         // for ~30min (wait_for_dom churn). Do it in-page.
                         // Bounded: same evaluate cost as settled_url — a
                         // dead context must not stall the goto arm here.
-                        let cur = tokio::time::timeout(
-                            std::time::Duration::from_secs(3),
-                            page.url(),
-                        )
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok())
-                        .unwrap_or_default();
+                        let cur =
+                            tokio::time::timeout(std::time::Duration::from_secs(3), page.url())
+                                .await
+                                .ok()
+                                .and_then(|r| r.ok())
+                                .unwrap_or_default();
                         let strip_frag = |u: &str| u.split('#').next().unwrap_or("").to_string();
                         let same_doc = !cur.is_empty() && strip_frag(&cur) == strip_frag(url);
                         let nav_res = if same_doc {

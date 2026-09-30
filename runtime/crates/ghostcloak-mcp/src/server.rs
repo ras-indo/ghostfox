@@ -3765,7 +3765,10 @@ impl GhostcloakServer {
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
         let expr = HITTEST_JS
-            .replace("@@SEL@@", &js_escape(&selector.unwrap_or_default()))
+            .replace(
+                "@@SEL@@",
+                &js_escape(&selector.clone().unwrap_or_default()),
+            )
             .replace(
                 "@@PX@@",
                 &x.map(|v| v.to_string()).unwrap_or_else(|| "null".into()),

@@ -151,6 +151,7 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
         "page_hit_test",
         "browser_exec",
         "page_wait_for_text",
+        "page_wait_rate_limit",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }
@@ -158,8 +159,9 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
     // exposed by GhostcloakServer. If a tool is ever removed (or added),
     // update this list deliberately — never silently drop tools.
     // Batch 1 (9) + batch 2 (4) + dialog (1) + emulate (1) + research-4 (4) + fill_form (1) +
-    // research-5 (2) + exec (2: browser_exec, page_wait_for_text) = 72.
-    assert_eq!(names.len(), 72, "tools: {names:?}");
+    // research-5 (2) + exec (2: browser_exec, page_wait_for_text) +
+    // rate-limit (1: page_wait_rate_limit) = 73.
+    assert_eq!(names.len(), 73, "tools: {names:?}");
 
     let generated = request(
         &mut child,

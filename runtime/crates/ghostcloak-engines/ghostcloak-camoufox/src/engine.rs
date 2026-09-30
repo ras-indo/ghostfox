@@ -3377,7 +3377,11 @@ impl PageHandle for CamoufoxPage {
                             // missed.
                             if let Err(e) = self
                                 .conn
-                                .request_session("Runtime.enable", serde_json::json!({}), Some(&sid))
+                                .request_session(
+                                    "Runtime.enable",
+                                    serde_json::json!({}),
+                                    Some(&sid),
+                                )
                                 .await
                             {
                                 tracing::debug!(target: "ghostcloak::camoufox", "Runtime.enable recovery failed: {e}");

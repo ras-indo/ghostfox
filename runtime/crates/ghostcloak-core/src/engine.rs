@@ -63,6 +63,10 @@ pub struct A11ySnapshot {
     /// (prompt injection patterns, hidden text).
     #[serde(default)]
     pub suspicious_elements: usize,
+    /// v0.5: number of elements where hidden text was stripped from the
+    /// accessible name/value (content sanitization — see element `stripped`).
+    #[serde(default)]
+    pub stripped_content: usize,
     /// v0.5.3: page is archived (read-only, no new interactions possible).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_archived: Option<bool>,
@@ -108,6 +112,10 @@ pub struct A11yElement {
     /// v0.5: element contains suspicious content (prompt injection patterns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspicious: Option<bool>,
+    /// v0.5: number of invisible chars stripped from this element's
+    /// innerText-derived name/value (content sanitization).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stripped: Option<usize>,
     /// v0.5.3: HTML tag name (button, input, a, shreddit-*, facepile-*...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,

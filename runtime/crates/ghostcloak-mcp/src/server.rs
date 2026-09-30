@@ -4986,6 +4986,7 @@ impl GhostcloakServer {
                     page_title: String::new(),
                     danger_zone: None,
                     suspicious_elements: 0,
+                    stripped_content: 0,
                     page_archived: None,
                     own_elements: 0,
                     username: None,

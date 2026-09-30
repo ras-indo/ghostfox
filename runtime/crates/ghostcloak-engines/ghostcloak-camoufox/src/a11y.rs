@@ -35,6 +35,26 @@ pub(crate) const WALK_JS: &str = r#"(
       );
     }
 
+    // v0.5 CONTENT SANITIZATION: the text a human can actually SEE. Walks
+    // text nodes and skips what is planted invisible: display:none children,
+    // visibility:hidden, font-size:0, opacity<0.01, aria-hidden subtrees.
+    // (innerText already skips display:none, but NOT the other four.)
+    function visibleText(el) {
+      var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      var parts = [], node;
+      while ((node = walker.nextNode())) {
+        var p = node.parentElement;
+        if (!p || !node.nodeValue || !node.nodeValue.trim()) continue;
+        if (p.closest('[aria-hidden="true"]')) continue;
+        var s = getComputedStyle(p);
+        if (s.display === 'none' || s.visibility === 'hidden') continue;
+        if (parseFloat(s.fontSize) === 0) continue;
+        if (s.opacity !== '' && parseFloat(s.opacity) < 0.01) continue;
+        parts.push(node.nodeValue);
+      }
+      return parts.join('').replace(/\s+/g, ' ').trim();
+    }
+
     function roleOf(el) {
       const aria = el.getAttribute('role');
       if (aria) return aria;
@@ -68,12 +88,30 @@ pub(crate) const WALK_JS: &str = r#"(
       if (!visible(el)) return;
       const role = roleOf(el);
       if (!role) return;
-      const name = nameOf(el);
+      let name = nameOf(el);
       if (!name && (role === 'button' || role === 'link')) return;
 
       // v0.5: Hidden content detection — check for invisible text planted
       // in the accessible name that might contain injection attempts
       const rawName = el.innerText || el.value || '';
+      // v0.5 CONTENT SANITIZATION (ROADMAP): strip invisible text from
+      // innerText-derived name/value; report how many chars were stripped
+      // (entry.stripped, snapshot stripped_content).
+      var strippedChars = 0;
+      var visText = null;
+      if (el.innerText) {
+        var fullText = el.innerText.replace(/\s+/g, ' ').trim();
+        if (fullText) {
+          visText = visibleText(el);
+          if (visText.length < fullText.length) {
+            strippedChars = fullText.length - visText.length;
+            // name came from the innerText fallback in nameOf? rebuild it
+            // from visible text only (aria-label/placeholder names stay —
+            // they are attributes, not page text).
+            if (name === fullText.slice(0, 80)) name = visText.slice(0, 80);
+          }
+        }
+      }
       const hiddenPatterns = [
         /\bignore (all )?(previous|prior) (instructions?|prompts?)/i,
         /\bdisregard (your|all|any) (previous|prior)/i,
@@ -106,8 +144,9 @@ pub(crate) const WALK_JS: &str = r#"(
       }
       const entry = { ref: ref, role: role, name: name };
       if (suspicious) entry.suspicious = true;
+      if (strippedChars > 0) entry.stripped = strippedChars;
       if (role === 'textbox' || el.tagName === 'SELECT') {
-        entry.value = String(el.value != null ? el.value : (el.innerText || '')).slice(0, 200);
+        entry.value = String(el.value != null ? el.value : ((visText != null ? visText : el.innerText) || '')).slice(0, 200);
       }
       if (el.checked !== undefined && el.type !== 'text') entry.checked = !!el.checked;
       if (el.disabled) entry.disabled = true;
@@ -190,6 +229,8 @@ pub(crate) const WALK_JS: &str = r#"(
 
     // v0.5: Count suspicious elements
     var suspiciousCount = out.filter(function(e) { return e.suspicious; }).length;
+    // v0.5: elements where hidden text was stripped from name/value.
+    var strippedCount = out.filter(function(e) { return e.stripped; }).length;
 
     // v0.5.3: Page state — archived / read-only detection.
     var archived = /this (post|thread|topic) (has been )?archived/i.test(pageText) ||
@@ -318,6 +359,7 @@ pub(crate) const WALK_JS: &str = r#"(
       page_title: document.title,
       danger_zone: danger,
       suspicious_elements: suspiciousCount,
+      stripped_content: strippedCount,
       page_archived: archived,
       own_elements: ownCount,
       username: uname,

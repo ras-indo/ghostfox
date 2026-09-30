@@ -3279,7 +3279,8 @@ impl PageHandle for CamoufoxPage {
             if self.crashed.load(Ordering::SeqCst) {
                 return Err(GhostError::PageOp(
                     "renderer crashed: the page's execution context is gone — \
-                     reopen the page with page_open".into(),
+                     reopen the page with page_open"
+                        .into(),
                 ));
             }
             // Wait (bounded) for the pump to (re)establish a live context.
@@ -3314,7 +3315,8 @@ impl PageHandle for CamoufoxPage {
                 Err(_) => {
                     return Err(GhostError::PageOp(
                         "target session detached (page closed or renderer died) — \
-                         reopen the page with page_open".into(),
+                         reopen the page with page_open"
+                            .into(),
                     ));
                 }
             };

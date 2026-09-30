@@ -884,8 +884,7 @@ async fn wait_for_dom(page: &Arc<dyn ghostcloak_core::engine::PageHandle>) {
     // Overall deadline, not just per-iteration: a dead execution context
     // makes each evaluate() burn up to ~35s in retry backoff, so "60 tries"
     // alone can hold a caller (and exec_lock) hostage for half an hour.
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(12);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
     for _ in 0..60 {
         if std::time::Instant::now() > deadline {
             break;
@@ -5577,10 +5576,8 @@ impl GhostcloakServer {
                         // to a frame id juggler rejects, wedging exec_lock
                         // for ~30min (wait_for_dom churn). Do it in-page.
                         let cur = page.url().await.unwrap_or_default();
-                        let strip_frag =
-                            |u: &str| u.split('#').next().unwrap_or("").to_string();
-                        let same_doc =
-                            !cur.is_empty() && strip_frag(&cur) == strip_frag(url);
+                        let strip_frag = |u: &str| u.split('#').next().unwrap_or("").to_string();
+                        let same_doc = !cur.is_empty() && strip_frag(&cur) == strip_frag(url);
                         let nav_res = if same_doc {
                             page.evaluate(&format!("location.href = {url:?}; 'ok'"))
                                 .await

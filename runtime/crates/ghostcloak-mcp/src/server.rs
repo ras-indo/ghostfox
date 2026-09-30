@@ -889,7 +889,9 @@ fn heal_js(src: &str, err: &str) -> Option<(String, &'static str)> {
     }
     // 2. over-escaped double quotes: `\"text\"` as a whole expression —
     // also fires on Juggler's "invalid escape sequence"
-    if src.contains("\\\"") && (err.contains("invalid escape sequence") || err.contains("Unexpected token")) {
+    if src.contains("\\\"")
+        && (err.contains("invalid escape sequence") || err.contains("Unexpected token"))
+    {
         let fixed = src.replace("\\\"", "\"");
         if fixed.contains('"') {
             return Some((fixed, "removed over-escaping of double quotes"));

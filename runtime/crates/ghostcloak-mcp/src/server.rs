@@ -4942,7 +4942,9 @@ impl GhostcloakServer {
                     Some(&page_id),
                     serde_json::json!({ "cleared": true, "waited_s": start.elapsed().as_secs() }),
                 );
-                return Ok(text_result(serde_json::to_string_pretty(&obj).unwrap_or_default()));
+                return Ok(text_result(
+                    serde_json::to_string_pretty(&obj).unwrap_or_default(),
+                ));
             }
             let waited = start.elapsed().as_secs();
             if waited >= budget {
@@ -4959,7 +4961,9 @@ impl GhostcloakServer {
                     Some(&page_id),
                     serde_json::json!({ "cleared": false, "waited_s": waited }),
                 );
-                return Ok(text_result(serde_json::to_string_pretty(&obj).unwrap_or_default()));
+                return Ok(text_result(
+                    serde_json::to_string_pretty(&obj).unwrap_or_default(),
+                ));
             }
             // Sleep out the site's stated window, bounded by remaining
             // budget, with a small jitter so N agents don't re-fire in
@@ -5655,8 +5659,7 @@ impl GhostcloakServer {
             // Total budget for ALL queued actions: even with every arm
             // individually bounded, 8 worst-case arms could pin exec_lock
             // for many minutes. Stop cleanly when the budget burns.
-            let act_deadline =
-                std::time::Instant::now() + std::time::Duration::from_secs(90);
+            let act_deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
             for act in queued.iter().take(8) {
                 if std::time::Instant::now() > act_deadline {
                     actions.push(serde_json::json!({

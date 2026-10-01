@@ -241,10 +241,12 @@ pub fn env_for_identity(
 
     // Platform fontconfig shipped with the binary. Android personas reuse the
     // Linux font stack (the spoofed font list carries the persona).
+    // NOTE: directory names under <home>/fontconfig/ are "linux", "windows",
+    // "macos" — match them exactly or FONTCONFIG_PATH points nowhere.
     let ua_os = match identity.platform {
-        Platform::Windows => "win",
-        Platform::MacOS => "mac",
-        Platform::Linux | Platform::Android => "lin",
+        Platform::Windows => "windows",
+        Platform::MacOS => "macos",
+        Platform::Linux | Platform::Android => "linux",
     };
     let fc = camoufox_home.join("fontconfig").join(ua_os);
     env.insert(

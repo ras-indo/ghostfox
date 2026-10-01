@@ -101,6 +101,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Android personas no longer render tofu (bug #7)** — every content
+  font lookup passes the engine's masked-font-list allowlist
+  (`cfg["fonts"]`, checked after fontconfig substitution), and the
+  Android identity carried Android's native names (Roboto, Droid Sans
+  Mono, Coming Soon, Carrois Gothic SC) which are NOT in the bundled
+  Linux font set. The allowlist therefore blocked every family and all
+  text rendered as `.notdef` boxes — screenshots, DOM and canvas alike
+  — while Windows/Mac/Linux personas drew fine. The Android persona
+  now reports the Linux font stack (`LINUX_FONTS`), which this engine
+  actually draws with, satisfying camoufox's own invariant that
+  everything reported must be renderable.
+- **`FONTCONFIG_PATH` pointed at directories that do not exist** —
+  `env_for_identity` mapped OS → `fontconfig/win|mac|lin` but the
+  shipped tree is `fontconfig/windows|macos|linux`, so the bundled
+  per-OS fontconfig was never found and fontconfig fell back to
+  whatever it could resolve. Corrected the mapping (Android keeps the
+  Linux stack).
+
 - **`page_open` no longer fails silently** — a navigation that dies
   before commit (e.g. `NS_ERROR_NET_EMPTY_RESPONSE`) used to return a
   healthy-looking page id that sat on `about:blank` forever, making

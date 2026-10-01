@@ -221,7 +221,15 @@ impl DevicePreset {
             Platform::Windows => WIN_FONTS,
             Platform::MacOS => MAC_FONTS,
             Platform::Linux => LINUX_FONTS,
-            Platform::Android => ANDROID_FONTS,
+            // Android personas run on the Linux engine build: the masked font
+            // list is the ALLOWLIST the engine checks every content lookup
+            // against, so it must only carry families the bundled Linux
+            // fontconfig can actually resolve. Android's native names (Roboto,
+            // Droid Sans Mono, Coming Soon, Carrois Gothic SC) are not in the
+            // bundle; allowing them blocks every lookup after substitution and
+            // content renders as .notdef (tofu boxes). Report the Linux stack
+            // instead, which is what this host really draws with.
+            Platform::Android => LINUX_FONTS,
         }
     }
 }

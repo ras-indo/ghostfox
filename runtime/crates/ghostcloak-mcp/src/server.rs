@@ -4520,8 +4520,7 @@ impl GhostcloakServer {
             if bg_url.is_empty() || sl_url.is_empty() {
                 return Err(rmcp::model::ErrorData::internal_error(
                     "div fallback: .geetest_bg / .geetest_slice_bg exposed no \
-                     background-image URL"
-                        .into(),
+                     background-image URL",
                     None,
                 ));
             }

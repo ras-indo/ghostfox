@@ -720,7 +720,6 @@ mod same_document_tests {
 use tokio::sync::Mutex;
 
 impl CamoufoxPage {
-
     /// One fresh viewport frame via Page.startScreencast → the native
     /// nsScreencastService track (max 1 frame in flight, first frame needs
     /// no ack). Returns base64-decoded JPEG bytes, or None when the

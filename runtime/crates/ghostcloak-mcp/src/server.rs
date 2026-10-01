@@ -4460,13 +4460,41 @@ impl GhostcloakServer {
                          source: 'div:' + dBg.sel.replace(/^\./, '')}});
 }})()"#
         );
-        let out = page
-            .evaluate(&js)
-            .await
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-        let s = out.as_str().unwrap_or_default();
-        let v: serde_json::Value = serde_json::from_str(s)
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+        let mut v = serde_json::Value::Null;
+        // Layer rects can read 0x0 for a moment while the challenge is
+        // still animating in (float-in) or the holder has not been laid
+        // out yet — poll briefly instead of rejecting a legitimately open
+        // challenge as degenerate.
+        for attempt in 0..10u32 {
+            let out = page
+                .evaluate(&js)
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            let s = out.as_str().unwrap_or_default().to_string();
+            let parsed: serde_json::Value = serde_json::from_str(&s)
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            let degenerate = parsed
+                .get("source")
+                .and_then(|x| x.as_str())
+                .map(|src| src.starts_with("div"))
+                .unwrap_or(false)
+                && {
+                    let bg = parsed
+                        .get("div")
+                        .and_then(|d| d.get("bg"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let w = bg.get("w").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                    let h = bg.get("h").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                    w <= 0.0 || h <= 0.0
+                };
+            if degenerate && attempt < 9 {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                continue;
+            }
+            v = parsed;
+            break;
+        }
         if let Some(err) = v.get("err").and_then(|e| e.as_str()).map(|e| e.to_string()) {
             return Err(rmcp::model::ErrorData::internal_error(err, None));
         }

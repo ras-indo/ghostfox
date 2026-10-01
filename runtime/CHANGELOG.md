@@ -101,6 +101,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`page_geetest_slide` waits for the layer layout (0x0 poll)** — the
+  div-mode background/slice rect can read 0x0 for a moment while the
+  challenge is still animating in or the holder has not been laid out;
+  the tool used to reject that as `degenerate background layer` even
+  though the challenge WAS open. It now re-evaluates up to 10x at
+  400ms before giving up (the loud "is the slide challenge open?" error
+  is unchanged for a genuinely closed challenge).
+
 - **Android personas no longer render tofu (bug #7)** — every content
   font lookup passes the engine's masked-font-list allowlist
   (`cfg["fonts"]`, checked after fontconfig substitution), and the

@@ -640,7 +640,7 @@ struct IdleParams {
     idle_ms: Option<u64>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct WaitForTimeoutParams {
     session_id: String,
     page_id: String,

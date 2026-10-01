@@ -3299,35 +3299,88 @@ impl GhostcloakServer {
                 )
                 .await;
         }
+        // Camoufox-headless quirk (verified empirically): clipboard
+        // writeText() PERFORMS the write, but from the 2nd call on its
+        // promise often never settles — a raw await would hang the tool for
+        // the whole evaluate timeout. Every clipboard call is therefore
+        // raced against a timer, and an unconfirmed write is proven by a
+        // readback.
         let out = match action.as_str() {
             "read" => {
-                let v = page
-                    .evaluate("navigator.clipboard.readText()")
+                let expr = "Promise.race([navigator.clipboard.readText().then(function(x){return 'OK:'+JSON.stringify(x);}), new Promise(function(r){setTimeout(function(){return r('BLOCKED');},2000);})])";
+                let mut verdict = page
+                    .evaluate(expr)
                     .await
-                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
-                serde_json::json!({
-                    "action": "read",
-                    "text": v.as_str().unwrap_or_default(),
-                    "origin": origin,
-                    "ok": true,
-                })
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                if verdict == "BLOCKED" {
+                    // An empty clipboard can stall the first read — one retry.
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    verdict = page
+                        .evaluate(expr)
+                        .await
+                        .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                }
+                if let Some(raw) = verdict.strip_prefix("OK:") {
+                    let text = serde_json::from_str::<String>(raw)
+                        .unwrap_or_else(|_| raw.trim_matches('"').to_string());
+                    serde_json::json!({
+                        "action": "read",
+                        "text": text,
+                        "origin": origin,
+                        "ok": true,
+                    })
+                } else {
+                    return Err(rmcp::model::ErrorData::internal_error(
+                        "clipboard read did not resolve (headless camoufox; typical when the \
+                         clipboard is empty) — write first, or read page-side data with page_eval",
+                        None,
+                    ));
+                }
             }
             "write" => {
                 let t = text.filter(|s| !s.is_empty()).ok_or_else(|| {
                     rmcp::model::ErrorData::invalid_params("action=write needs text", None)
                 })?;
+                let enc = serde_json::to_string(&t).unwrap_or_else(|_| "\"\"".into());
                 let expr = format!(
-                    "navigator.clipboard.writeText({})",
-                    serde_json::to_string(&t).unwrap_or_else(|_| "\"\"".into())
+                    "Promise.race([navigator.clipboard.writeText({t}).then(function(){{return \
+                     'WROTE';}}), new Promise(function(r){{setTimeout(function(){{return \
+                     r('UNCONFIRMED');}},2500);}})])",
+                    t = enc
                 );
-                page.evaluate(&expr)
+                let verdict = page
+                    .evaluate(&expr)
                     .await
-                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let mut confirmed = verdict == "WROTE";
+                if !confirmed {
+                    // The write usually landed even though its promise never
+                    // settled — prove it by reading the clipboard back.
+                    let rb = "Promise.race([navigator.clipboard.readText().then(function(x){return 'OK:'+JSON.stringify(x);}), new Promise(function(r){setTimeout(function(){return r('BLOCKED');},1500);})])";
+                    if let Ok(v) = page.evaluate(rb).await {
+                        confirmed = v
+                            .as_str()
+                            .and_then(|s| s.strip_prefix("OK:"))
+                            .and_then(|s| serde_json::from_str::<String>(s).ok())
+                            .map(|got| got == t)
+                            .unwrap_or(false);
+                    }
+                }
                 serde_json::json!({
                     "action": "write",
                     "text": t,
                     "origin": origin,
                     "ok": true,
+                    "confirmed": confirmed,
                 })
             }
             other => {

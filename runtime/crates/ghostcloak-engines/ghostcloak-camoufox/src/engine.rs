@@ -8,7 +8,7 @@ use std::os::fd::AsRawFd;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -533,15 +533,6 @@ impl CamoufoxEngine {
                                 Some("Page.videoRecordingFinished") => {
                                     handle2.video_recording.store(false, Ordering::SeqCst);
                                 }
-                                Some("Page.screencastFrame") => {
-                                    if let Some(d) =
-                                        msg.pointer("/params/data").and_then(|v| v.as_str())
-                                    {
-                                        *handle2.screencast_frame.lock().await =
-                                            Some(d.to_string());
-                                        handle2.screencast_seq.fetch_add(1, Ordering::SeqCst);
-                                    }
-                                }
                                 Some("Page.navigationCommitted") => {
                                     if let Some(fid) =
                                         msg.pointer("/params/frameId").and_then(|v| v.as_str())
@@ -627,12 +618,6 @@ pub struct CamoufoxPage {
     /// evaluate() fails fast with an actionable message instead of spinning
     /// ~30s against a context that will never come back.
     crashed: AtomicBool,
-    /// Latest Page.screencastFrame (base64 JPEG) + monotonic sequence.
-    /// The fresh-capture screenshot path reads these: Page.screenshot's
-    /// drawSnapshot serves a STALE frame on this build (scroll/DOM changes
-    /// invisible), while the native screencast track tracks reality.
-    screencast_frame: Mutex<Option<String>>,
-    screencast_seq: AtomicU64,
     /// Native video recording (Browser.setVideoRecordingOptions on the
     /// default context): path of the .webm this target is writing, plus
     /// whether the recorder is live (Page.videoRecordingStarted/Finished).
@@ -720,115 +705,6 @@ mod same_document_tests {
 use tokio::sync::Mutex;
 
 impl CamoufoxPage {
-    /// One fresh viewport frame via Page.startScreencast → the native
-    /// nsScreencastService track (max 1 frame in flight, first frame needs
-    /// no ack). Returns base64-decoded JPEG bytes, or None when the
-    /// service is unavailable / produced no frame within 3s — the caller
-    /// falls back to the drawSnapshot path. Screencast is always stopped
-    /// on every exit so a failed capture never leaks the service.
-    async fn screencast_shot(&self, sid: &str) -> Option<Vec<u8>> {
-        use base64::Engine as _;
-        let dims = self
-            .evaluate("JSON.stringify([window.innerWidth, window.innerHeight])")
-            .await
-            .ok()?;
-        let (w, h) = dims
-            .as_str()
-            .and_then(|s| {
-                let parts: Vec<u32> = s
-                    .trim_matches(|c| c == '"' || c == '[' || c == ']')
-                    .split(',')
-                    .filter_map(|p| p.trim().parse().ok())
-                    .collect();
-                (parts.len() == 2).then_some((parts[0], parts[1]))
-            })
-            .unwrap_or((1280, 800));
-        let seq0 = self.screencast_seq.load(Ordering::SeqCst);
-        *self.screencast_frame.lock().await = None;
-        let start_res = match self
-            .conn
-            .request_session(
-                "Page.startScreencast",
-                serde_json::json!({ "width": w, "height": h, "quality": 95 }),
-                Some(sid),
-            )
-            .await
-        {
-            Ok(res) => {
-                tracing::debug!(
-                    target: "ghostcloak::camoufox",
-                    "screencast_shot: started {w}x{h} q=95 seq0={seq0}"
-                );
-                res
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "ghostcloak::camoufox",
-                    "screencast_shot: startScreencast rejected: {e}"
-                );
-                return None;
-            }
-        };
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(3000);
-        let mut frame = None;
-        while tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            if self.screencast_seq.load(Ordering::SeqCst) > seq0 {
-                frame = self.screencast_frame.lock().await.clone();
-                break;
-            }
-        }
-        // kMaxFramesInFlight = 1: the service may hold the pre-scroll frame
-        // as the queued one on start, so ack frame 1 and grab frame 2 — the
-        // post-ack capture reflects the live page (scroll included). When no
-        // second frame arrives within 1.8s (nothing changed) frame 1 stands.
-        if frame.is_some() {
-            let seq1 = self.screencast_seq.load(Ordering::SeqCst);
-            if let Some(sid_str) = start_res.get("screencastId").and_then(|v| v.as_str()) {
-                let _ = self
-                    .conn
-                    .request_session(
-                        "Page.screencastFrameAck",
-                        serde_json::json!({ "screencastId": sid_str }),
-                        Some(sid),
-                    )
-                    .await;
-            }
-            let deadline2 = tokio::time::Instant::now() + std::time::Duration::from_millis(1800);
-            while tokio::time::Instant::now() < deadline2 {
-                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-                if self.screencast_seq.load(Ordering::SeqCst) > seq1 {
-                    let next = self.screencast_frame.lock().await.clone();
-                    if next.is_some() {
-                        tracing::debug!(
-                            target: "ghostcloak::camoufox",
-                            "screencast_shot: post-ack frame 2 arrived (seq {seq1} -> {})",
-                            self.screencast_seq.load(Ordering::SeqCst)
-                        );
-                        frame = next;
-                    }
-                    break;
-                }
-            }
-        }
-        let _ = self
-            .conn
-            .request_session("Page.stopScreencast", serde_json::json!({}), Some(sid))
-            .await;
-        let Some(b64) = frame else {
-            tracing::debug!(
-                target: "ghostcloak::camoufox",
-                "screencast_shot: no frame within 3s (seq0={seq0}) - drawSnapshot fallback"
-            );
-            return None;
-        };
-        tracing::debug!(
-            target: "ghostcloak::camoufox",
-            "screencast_shot: frame ok b64_len={}",
-            b64.len()
-        );
-        base64::engine::general_purpose::STANDARD.decode(b64).ok()
-    }
     fn new(conn: Arc<JugglerConnection>, target_id: String) -> Arc<Self> {
         Arc::new(Self {
             conn,
@@ -838,8 +714,6 @@ impl CamoufoxPage {
             frame_id: Mutex::new(None),
             execution_context_id: Mutex::new(None),
             crashed: AtomicBool::new(false),
-            screencast_frame: Mutex::new(None),
-            screencast_seq: AtomicU64::new(0),
             video_file: Mutex::new(None),
             video_recording: AtomicBool::new(false),
         })
@@ -1369,14 +1243,6 @@ impl Engine for CamoufoxEngine {
                             }
                             if method == Some("Page.videoRecordingFinished") {
                                 handle2.video_recording.store(false, Ordering::SeqCst);
-                            }
-                            if method == Some("Page.screencastFrame") {
-                                if let Some(d) =
-                                    msg.pointer("/params/data").and_then(|v| v.as_str())
-                                {
-                                    *handle2.screencast_frame.lock().await = Some(d.to_string());
-                                    handle2.screencast_seq.fetch_add(1, Ordering::SeqCst);
-                                }
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -3542,42 +3408,20 @@ impl PageHandle for CamoufoxPage {
         use base64::Engine as _;
         let sid = self.session_id().await?;
 
-        // FRESH CAPTURE: viewport shots go through the native screencast
-        // service (nsScreencastService — same track the video recorder
-        // uses), because Page.screenshot's drawSnapshot serves a STALE
-        // frame on this build: scrollY 0→900 and DOM mutations came back
-        // byte-identical, while screencast frames track every change
-        // (verified against recorded video). The frame arrives as JPEG;
-        // the server re-encodes to PNG. full_page keeps drawSnapshot —
-        // screencast is viewport-only.
-        if !full_page {
-            match self.screencast_shot(&sid).await {
-                Some(jpeg) => {
-                    tracing::debug!(
-                        target: "ghostcloak::camoufox",
-                        "screenshot: fresh screencast frame used ({} bytes)",
-                        jpeg.len()
-                    );
-                    return Ok(jpeg);
-                }
-                None => {
-                    tracing::debug!(
-                        target: "ghostcloak::camoufox",
-                        "screenshot: screencast capture unavailable — falling back to drawSnapshot"
-                    );
-                }
-            }
-        }
-
-        // The Juggler screenshot takes an explicit clip: viewport shots use
-        // the window size, full-page shots measure the scrollable document.
+        // drawSnapshot's clip is in DOCUMENT coordinates: clip (0,0,w,h)
+        // always renders the TOP of the document no matter where the
+        // page is scrolled — that is what made viewport shots look
+        // "frozen" on scroll (paint changes in the top band still showed
+        // up; the scroll offset never did). The fix is therefore to feed
+        // the CURRENT scroll offset as clip.y, capturing exactly the
+        // visible viewport. full-page shots keep y=0 (whole document).
         let dims_expr = if full_page {
-            "JSON.stringify([Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0), Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)])"
+            "JSON.stringify([Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0), Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0), 0])"
         } else {
-            "JSON.stringify([window.innerWidth, window.innerHeight])"
+            "JSON.stringify([window.innerWidth, window.innerHeight, Math.round(window.scrollY || window.pageYOffset || 0)])"
         };
         let dims = self.evaluate(dims_expr).await?;
-        let (w, h) = dims
+        let parsed = dims
             .as_str()
             .and_then(|s| {
                 let inner = s.trim_matches('"');
@@ -3586,16 +3430,16 @@ impl PageHandle for CamoufoxPage {
                     .split(',')
                     .filter_map(|p| p.trim().parse().ok())
                     .collect();
-                if parts.len() == 2 {
-                    Some((parts[0], parts[1]))
+                if parts.len() == 3 {
+                    Some((parts[0], parts[1], parts[2]))
                 } else {
                     None
                 }
             })
-            .unwrap_or((1280, 800));
+            .unwrap_or((1280, 800, 0));
         // Engine canvas caps: 32767px per side.
         let cap = 32767u32;
-        let (w, h) = (w.min(cap), h.min(cap));
+        let (w, h, sy) = (parsed.0.min(cap), parsed.1.min(cap), parsed.2);
 
         let result = self
             .conn
@@ -3603,7 +3447,7 @@ impl PageHandle for CamoufoxPage {
                 "Page.screenshot",
                 serde_json::json!({
                     "mimeType": "image/png",
-                    "clip": { "x": 0, "y": 0, "width": w, "height": h },
+                    "clip": { "x": 0, "y": sy, "width": w, "height": h },
                     // 1:1 pixels regardless of the identity's spoofed DPR.
                     "omitDeviceScaleFactor": true,
                 }),

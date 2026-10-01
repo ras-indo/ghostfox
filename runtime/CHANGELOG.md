@@ -14,21 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   missing-tool gap for "wait until the challenge widget paints" when
   `page_wait_for_idle` returns too early; validates session/page FIRST
   so a dead session fails immediately instead of sleeping uselessly.
-- **Fresh screenshot capture (stale-frame fix)** — viewport
-  `page_screenshot` now captures through juggler's NATIVE screencast
-  track (`Page.startScreencast` → `nsScreencastService` → one JPEG
-  frame → server re-encodes to PNG) instead of `Page.screenshot`'s
-  `drawSnapshot`, which on this build serves a STALE frame: scroll
-  (scrollY 0→900) and DOM mutations came back byte-identical while the
-  screencast/video track visibly followed every change. Fallback to
-  the old drawSnapshot path when the service yields no frame in 3s
-  (screencast is always stopped on every exit). `full_page` keeps
-  drawSnapshot (screencast is viewport-only). The capture ACKs the
-  first frame (`Page.screencastFrameAck`, kMaxFramesInFlight=1) and
-  waits up to 1.8s for a post-ack frame: the pre-ack frame can be the
-  queued pre-scroll state, the post-ack one tracks the live page
-  (scroll included) — verified against the video track, which
-  followed every scroll while the raw first frame did not.
+- **Fresh viewport screenshots after scroll (stale-frame fix)** —
+  viewport `page_screenshot` used to send `clip: (0,0,w,h)`, but
+  juggler's `drawSnapshot` clip is in DOCUMENT coordinates: the shot
+  always rendered the TOP of the document no matter where the page
+  was scrolled (scrollY 0→900 came back byte-identical, while paint
+  changes in the top band did show up — the confusing "half-stale"
+  signature). The capture now reads the live scroll offset and sends
+  `clip.y = scrollY`, so a scrolled page returns exactly its visible
+  viewport; `full_page` keeps `y=0` for the whole-document render.
+  (An intermediate nsScreencastService-based path was tried and
+  reverted: the native screencast track serves the same top-band
+  frame.)
 
 - **`page_clipboard`** — read/write the system clipboard via
   `navigator.clipboard` (mobile-mcp `mobile_clipboard` parity):

@@ -6392,9 +6392,10 @@ impl GhostcloakServer {
             .await
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         let orig_bytes = png.len();
-        // The fresh-capture path (engine screencast) hands back a JPEG
-        // compositor frame — the contract below is PNG bytes (record
-        // extension, IHDR dims, inline image), so normalize right here.
+        // Engines normally hand back PNG; if a future capture path (or a
+        // JPEG-encoding engine) returns JPEG bytes, normalize them here —
+        // the contract below is PNG (record extension, IHDR dims, inline
+        // image).
         if png.len() > 2 && png[0] == 0xFF && png[1] == 0xD8 {
             let img = image::load_from_memory(&png)
                 .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;

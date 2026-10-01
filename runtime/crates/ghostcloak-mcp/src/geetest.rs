@@ -475,6 +475,362 @@ pub fn slide_gap(
     Ok(hx0.saturating_sub(px0))
 }
 
+/// Resolve one axis of a CSS `background-size` token into a scale factor
+/// (returned value * natural size = rendered size). `None` for tokens this
+/// axis cannot interpret — the caller falls back to "fill the element".
+fn bg_size_scale(tok: &str, elem: f64, natural: f64) -> Option<f64> {
+    if natural <= 0.0 {
+        return None;
+    }
+    let t = tok.trim();
+    if let Some(v) = t.strip_suffix("px") {
+        let px: f64 = v.trim().parse().ok()?;
+        return Some(px / natural);
+    }
+    if let Some(v) = t.strip_suffix('%') {
+        let pct: f64 = v.trim().parse().ok()?;
+        if elem <= 0.0 {
+            return None;
+        }
+        return Some(pct / 100.0 * elem / natural);
+    }
+    if t == "auto" {
+        return Some(1.0);
+    }
+    None
+}
+
+/// Resolve one token of a CSS `background-position` into the scaled image's
+/// origin offset relative to the element's origin (may be negative — that is
+/// how a sprite sheet crops). Unknown tokens read as 0.
+fn bg_pos_offset(tok: &str, elem: f64, scaled: f64) -> f64 {
+    let t = tok.trim();
+    if let Some(v) = t.strip_suffix("px") {
+        return v.trim().parse::<f64>().unwrap_or(0.0);
+    }
+    if let Some(v) = t.strip_suffix('%') {
+        let pct: f64 = v.trim().parse().unwrap_or(0.0);
+        return pct / 100.0 * (elem - scaled);
+    }
+    match t {
+        "left" | "top" => 0.0,
+        "right" | "bottom" => elem - scaled,
+        "center" => (elem - scaled) / 2.0,
+        _ => 0.0,
+    }
+}
+
+/// Render one CSS background layer — an image plus its element's rect and
+/// computed `background-size`/`background-position` — into an ELEMENT-SIZED
+/// RGBA image. GeeTest v4's adaptive mode draws the challenge with divs
+/// (`.geetest_bg`, `.geetest_slice_bg`, `.geetest_fullbg`) that have no
+/// canvas to read; this reproduces exactly what the element shows, in CSS
+/// px, so downstream pixel math and the drag distance stay in CSS px like
+/// the canvas path's `toDataURL` canvases.
+pub fn render_bg_layer(
+    img: &image::DynamicImage,
+    elem_w: f64,
+    elem_h: f64,
+    bg_size: &str,
+    bg_pos: &str,
+) -> Result<image::RgbaImage> {
+    let (iw, ih) = (img.width() as f64, img.height() as f64);
+    if iw < 1.0 || ih < 1.0 || elem_w < 1.0 || elem_h < 1.0 {
+        return Err(anyhow!(
+            "degenerate background layer: {iw}x{ih} image in {elem_w}x{elem_h} element"
+        ));
+    }
+    let mut toks = bg_size.split_whitespace().filter(|t| !t.is_empty());
+    let first = toks.next().unwrap_or("auto");
+    let second = toks.next();
+    let (sx, sy) = if first == "cover" || first == "contain" {
+        let s = if first == "cover" {
+            (elem_w / iw).max(elem_h / ih)
+        } else {
+            (elem_w / iw).min(elem_h / ih)
+        };
+        (s, s)
+    } else {
+        let sx = bg_size_scale(first, elem_w, iw).unwrap_or(elem_w / iw);
+        let sy = second
+            .and_then(|t| bg_size_scale(t, elem_h, ih))
+            .unwrap_or(sx);
+        (sx, sy)
+    };
+    let (sw, sh) = (
+        ((iw * sx).round() as u32).max(1),
+        ((ih * sy).round() as u32).max(1),
+    );
+    let rgba = img.to_rgba8();
+    let scaled = if sw == rgba.width() && sh == rgba.height() {
+        rgba
+    } else {
+        image::imageops::resize(&rgba, sw, sh, FilterType::Triangle)
+    };
+    // background-position -> origin of the scaled image inside the element.
+    let mut ptoks = bg_pos.split_whitespace().filter(|t| !t.is_empty());
+    let (ox, oy) = match (ptoks.next(), ptoks.next()) {
+        (None, _) => (0.0, 0.0),
+        (Some(a), None) => match a {
+            "top" => (0.0, 0.0),
+            "bottom" => (0.0, elem_h - sh as f64),
+            "center" => (
+                (elem_w - sw as f64) / 2.0,
+                (elem_h - sh as f64) / 2.0,
+            ),
+            _ => (bg_pos_offset(a, elem_w, sw as f64), 0.0),
+        },
+        (Some(a), Some(b)) => (
+            bg_pos_offset(a, elem_w, sw as f64),
+            bg_pos_offset(b, elem_h, sh as f64),
+        ),
+    };
+    let (ew, eh) = (
+        elem_w.round().max(1.0) as u32,
+        elem_h.round().max(1.0) as u32,
+    );
+    let (oxi, oyi) = (ox.round() as i32, oy.round() as i32);
+    let mut out = image::RgbaImage::new(ew, eh);
+    for y in 0..eh {
+        let src_y = y as i32 - oyi;
+        if src_y < 0 || src_y >= sh as i32 {
+            continue;
+        }
+        for x in 0..ew {
+            let src_x = x as i32 - oxi;
+            if src_x < 0 || src_x >= sw as i32 {
+                continue;
+            }
+            out.put_pixel(x, y, *scaled.get_pixel(src_x as u32, src_y as u32));
+        }
+    }
+    Ok(out)
+}
+
+/// luma minus its (2r+1)-box local mean, borders clamped. The box mean
+/// absorbs the brightness step a hole's shadow lays across the patch — the
+/// cue that makes plain-luma correlation drift toward a smooth wrong spot —
+/// while the texture that identifies the hole survives untouched.
+fn highpass(plane: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    let (wr, hr) = (w as isize - 1, h as isize - 1);
+    let mut hor = vec![0f32; w * h];
+    for y in 0..h {
+        let row = y * w;
+        for x in 0..w {
+            let mut s = 0f32;
+            for k in -(r as isize)..=(r as isize) {
+                s += plane[row + (x as isize + k).clamp(0, wr) as usize];
+            }
+            hor[row + x] = s;
+        }
+    }
+    let n = ((2 * r + 1) * (2 * r + 1)) as f32;
+    let mut out = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut s = 0f32;
+            for k in -(r as isize)..=(r as isize) {
+                s += hor[((y as isize + k).clamp(0, hr) as usize) * w + x];
+            }
+            out[y * w + x] = plane[y * w + x] - s / n;
+        }
+    }
+    out
+}
+
+/// One exhaustive normalized cross-correlation pass: score every `pw` x `ph`
+/// window of `plane` against the compact patch (`pat`, sampled at `idxs`
+/// inside the patch) and keep every score — the runner-up check needs them.
+/// Returns `(scores, (best_score, best_dx, best_dy))`, dx fastest.
+fn ncc_scan(
+    plane: &[f32],
+    bw: u32,
+    bh: u32,
+    pat: &[f64],
+    idxs: &[usize],
+    pw: u32,
+    ph: u32,
+    mean_p: f64,
+    ss_p: f64,
+) -> (Vec<f32>, (f32, u32, u32)) {
+    let mf = pat.len() as f64;
+    let (pw_usz, nx) = (pw as usize, (bw - pw + 1) as usize);
+    let mut scores: Vec<f32> = Vec::with_capacity(nx * (bh - ph + 1) as usize);
+    let mut best = (-1f32, 0u32, 0u32);
+    for dy in 0..=(bh - ph) {
+        for dx in 0..=(bw - pw) {
+            let (mut sb, mut sbb, mut sab) = (0f64, 0f64, 0f64);
+            for (c, &k) in idxs.iter().enumerate() {
+                let i = (k % pw_usz) as u32;
+                let j = (k / pw_usz) as u32;
+                let b = plane[((dy + j) * bw + dx + i) as usize] as f64;
+                sb += b;
+                sbb += b * b;
+                sab += b * pat[c];
+            }
+            let var_b = sbb - sb * sb / mf;
+            let score = if var_b <= 1e-6 {
+                -1f32 // featureless window — correlation undefined
+            } else {
+                // cov = sum (p - mean_p)(b - mean_b) = sab - mean_p * sb
+                let cov = sab - sb * mean_p;
+                (cov / (ss_p * var_b).sqrt()) as f32
+            };
+            scores.push(score);
+            if score > best.0 {
+                best = (score, dx, dy);
+            }
+        }
+    }
+    (scores, best)
+}
+
+/// GeeTest v4 (div layers) WITHOUT a fullbg reference: find the hole by
+/// template-matching the piece into the bg. The piece is a crop of the
+/// original scene and the hole only shadows it, so brightness-invariant
+/// normalized cross-correlation (the same statistic as OpenCV's
+/// `TM_CCOEFF_NORMED`, what ddddocr runs on this exact pair) peaks at the
+/// hole. Only the piece's solid pixels (alpha > 128) are correlated — the
+/// transparent corners of a puzzle piece are padding, not content.
+///
+/// The hole's shadow is a brightness STEP across the patch, and on a
+/// low-texture bg that step can tilt plain-luma correlation toward a
+/// smooth wrong spot, so a second shadow-blind pass (high-pass luma) has to
+/// land on the same column before the answer is trusted; when the two
+/// disagree the result is refused instead of dragged. An all-opaque slice
+/// (no alpha) is correlated whole — it works when the slice is a clean
+/// crop, and the corroboration turns the ambiguous cases into a refusal.
+///
+/// Returns `hole_left - piece_left`, the same convention as [`slide_gap`],
+/// in background pixels. Errors when nothing clears the confidence floor:
+/// a blind drag wastes the challenge (and the host's rate-limit budget),
+/// an honest failure does not.
+pub fn slide_gap_no_full(bg: &image::GrayImage, slice: &image::RgbaImage) -> Result<usize> {
+    let (bw, bh) = bg.dimensions();
+    let (sw, sh) = slice.dimensions();
+    if bw == 0 || bh == 0 || sw == 0 || sh == 0 {
+        return Err(anyhow!("empty background or slice image"));
+    }
+    // Solid bbox of the piece. An all-opaque slice (no alpha channel) is
+    // its own bbox with x0 = 0, which reproduces slide_gap's convention.
+    let (mut x0, mut y0, mut x1, mut y1) = (sw, sh, 0u32, 0u32);
+    for y in 0..sh {
+        for x in 0..sw {
+            if slice.get_pixel(x, y).0[3] > 128 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x1 < x0 {
+        return Err(anyhow!("slice has no solid pixels"));
+    }
+    let (pw, ph) = (x1 - x0 + 1, y1 - y0 + 1);
+    if pw > bw || ph > bh {
+        return Err(anyhow!(
+            "slice ({pw}x{ph}) does not fit inside the background ({bw}x{bh})"
+        ));
+    }
+    // Same luma conversion the bg went through, so both sides correlate in
+    // one color space; the bg also becomes an f32 plane both scans read.
+    let sl_luma = image::DynamicImage::ImageRgba8(slice.clone()).to_luma8();
+    let bg_plane: Vec<f32> = bg.as_raw().iter().map(|&v| v as f32).collect();
+    let mut idxs: Vec<usize> = Vec::new();
+    let mut pat: Vec<f64> = Vec::new();
+    for j in 0..ph {
+        for i in 0..pw {
+            if slice.get_pixel(x0 + i, y0 + j).0[3] > 128 {
+                idxs.push((j * pw + i) as usize);
+                pat.push(sl_luma.get_pixel(x0 + i, y0 + j)[0] as f64);
+            }
+        }
+    }
+    let m = pat.len();
+    if m < 64 {
+        return Err(anyhow!("slice has too few solid pixels ({m})"));
+    }
+    let mf = m as f64;
+    let mean_p = pat.iter().sum::<f64>() / mf;
+    let mut ss_p = 0f64;
+    for &p in &pat {
+        let d = p - mean_p;
+        ss_p += d * d;
+    }
+    if ss_p < 1e-6 {
+        return Err(anyhow!("slice patch is flat — nothing to correlate"));
+    }
+    let (scores, best) = ncc_scan(&bg_plane, bw, bh, &pat, &idxs, pw, ph, mean_p, ss_p);
+    const NCC_FLOOR: f32 = 0.5;
+    const PEAK_ZONE: u32 = 8;
+    const PEAK_MARGIN: f32 = 0.05;
+    if best.0 < NCC_FLOOR {
+        return Err(anyhow!(
+            "no reliable slice match (best ncc {:.2} < 0.50) — refusing to drag blind",
+            best.0
+        ));
+    }
+    let nx = (bw - pw + 1) as usize;
+    let mut second = -1f32;
+    for (n, &sc) in scores.iter().enumerate() {
+        let dx = (n % nx) as u32;
+        let dy = (n / nx) as u32;
+        if dx.abs_diff(best.1) <= PEAK_ZONE && dy.abs_diff(best.2) <= PEAK_ZONE {
+            continue;
+        }
+        if sc > second {
+            second = sc;
+        }
+    }
+    if best.0 - second < PEAK_MARGIN {
+        return Err(anyhow!(
+            "ambiguous slice match (best ncc {:.2} vs {:.2} elsewhere) — refusing to drag blind",
+            best.0,
+            second
+        ));
+    }
+    // Corroboration. The hole's shadow is a piecewise brightness step across
+    // the patch, which can tilt plain-luma correlation toward a smooth wrong
+    // spot; the high-pass pass sees texture only, so both must land on the
+    // same column. They disagree -> the answer is a guess, and a guess
+    // spends the challenge.
+    const HP_RADIUS: usize = 2;
+    const HP_NCC_FLOOR: f32 = 0.15;
+    const HP_COLUMN_TOL: u32 = 3;
+    // Transparent pixels are padding: fill them with the patch mean so they
+    // neither drag the local mean around nor enter the correlation.
+    let mut pat_plane = vec![mean_p as f32; (pw * ph) as usize];
+    for (c, &k) in idxs.iter().enumerate() {
+        pat_plane[k] = pat[c] as f32;
+    }
+    let hp_plane = highpass(&pat_plane, pw as usize, ph as usize, HP_RADIUS);
+    let mut hp_pat: Vec<f64> = Vec::with_capacity(m);
+    for &k in &idxs {
+        hp_pat.push(hp_plane[k] as f64);
+    }
+    let mean_hp = hp_pat.iter().sum::<f64>() / mf;
+    let mut ss_hp = 0f64;
+    for &p in &hp_pat {
+        let d = p - mean_hp;
+        ss_hp += d * d;
+    }
+    // A near-smooth piece has no texture for the check to judge by.
+    if ss_hp >= 1e-6 {
+        let hp_bg = highpass(&bg_plane, bw as usize, bh as usize, HP_RADIUS);
+        let (_, hp_best) = ncc_scan(&hp_bg, bw, bh, &hp_pat, &idxs, pw, ph, mean_hp, ss_hp);
+        if hp_best.0 >= HP_NCC_FLOOR && hp_best.1.abs_diff(best.1) > HP_COLUMN_TOL {
+            return Err(anyhow!(
+                "inconsistent slice match (luma x={} vs high-pass x={}) — \
+                 refusing to drag blind",
+                best.1,
+                hp_best.1
+            ));
+        }
+    }
+    Ok(best.1.saturating_sub(x0) as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

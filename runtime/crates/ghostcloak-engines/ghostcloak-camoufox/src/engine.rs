@@ -745,7 +745,7 @@ impl CamoufoxPage {
             .unwrap_or((1280, 800));
         let seq0 = self.screencast_seq.load(Ordering::SeqCst);
         *self.screencast_frame.lock().await = None;
-        match self
+        let start_res = match self
             .conn
             .request_session(
                 "Page.startScreencast",
@@ -754,10 +754,13 @@ impl CamoufoxPage {
             )
             .await
         {
-            Ok(_) => tracing::debug!(
-                target: "ghostcloak::camoufox",
-                "screencast_shot: started {w}x{h} q=95 seq0={seq0}"
-            ),
+            Ok(res) => {
+                tracing::debug!(
+                    target: "ghostcloak::camoufox",
+                    "screencast_shot: started {w}x{h} q=95 seq0={seq0}"
+                );
+                res
+            }
             Err(e) => {
                 tracing::warn!(
                     target: "ghostcloak::camoufox",
@@ -765,7 +768,7 @@ impl CamoufoxPage {
                 );
                 return None;
             }
-        }
+        };
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(3000);
         let mut frame = None;
         while tokio::time::Instant::now() < deadline {
@@ -773,6 +776,43 @@ impl CamoufoxPage {
             if self.screencast_seq.load(Ordering::SeqCst) > seq0 {
                 frame = self.screencast_frame.lock().await.clone();
                 break;
+            }
+        }
+        // kMaxFramesInFlight = 1: the service may hold the pre-scroll frame
+        // as the queued one on start, so ack frame 1 and grab frame 2 — the
+        // post-ack capture reflects the live page (scroll included). When no
+        // second frame arrives within 1.8s (nothing changed) frame 1 stands.
+        if frame.is_some() {
+            let seq1 = self.screencast_seq.load(Ordering::SeqCst);
+            if let Some(sid_str) = start_res
+                .get("screencastId")
+                .and_then(|v| v.as_str())
+            {
+                let _ = self
+                    .conn
+                    .request_session(
+                        "Page.screencastFrameAck",
+                        serde_json::json!({ "screencastId": sid_str }),
+                        Some(sid),
+                    )
+                    .await;
+            }
+            let deadline2 =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(1800);
+            while tokio::time::Instant::now() < deadline2 {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                if self.screencast_seq.load(Ordering::SeqCst) > seq1 {
+                    let next = self.screencast_frame.lock().await.clone();
+                    if next.is_some() {
+                        tracing::debug!(
+                            target: "ghostcloak::camoufox",
+                            "screencast_shot: post-ack frame 2 arrived (seq {seq1} -> {})",
+                            self.screencast_seq.load(Ordering::SeqCst)
+                        );
+                        frame = next;
+                    }
+                    break;
+                }
             }
         }
         let _ = self

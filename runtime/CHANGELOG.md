@@ -23,7 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   screencast/video track visibly followed every change. Fallback to
   the old drawSnapshot path when the service yields no frame in 3s
   (screencast is always stopped on every exit). `full_page` keeps
-  drawSnapshot (screencast is viewport-only).
+  drawSnapshot (screencast is viewport-only). The capture ACKs the
+  first frame (`Page.screencastFrameAck`, kMaxFramesInFlight=1) and
+  waits up to 1.8s for a post-ack frame: the pre-ack frame can be the
+  queued pre-scroll state, the post-ack one tracks the live page
+  (scroll included) — verified against the video track, which
+  followed every scroll while the raw first frame did not.
 
 - **`page_clipboard`** — read/write the system clipboard via
   `navigator.clipboard` (mobile-mcp `mobile_clipboard` parity):
@@ -83,6 +88,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notifications}` — bounded (default 60s, hard cap 180s), READ-ONLY, and
   does not hold the exec lock, so a throttled site gets one paced wait
   instead of a hammer.
+- **`page_geetest_slide` div mode (GeeTest v4 adaptive)** — when the
+  challenge ships NO canvases (v4 renders `.geetest_bg` /
+  `.geetest_slice_bg` / `.geetest_fullbg` as div background-images),
+  the extractor falls back to those layers: Rust fetches the layer
+  URLs, replays each element's CSS `background-size`/`position` onto
+  an offscreen raster (`render_bg_layer`), and solves from the
+  rendered pixels. Slider handle resolves `.geetest_slider_button` →
+  `.geetest_btn` → `.geetest_btnFix`; the response reports which path
+  it took (`source: "canvas"` / `"div:..."`). When v4 ships no
+  fullbg, `slide_gap_no_full` template-matches the slice into the bg
+  (highpass + normalized cross-correlation) instead of the |bg-fullbg|
+  diff, and implausible drags (> bg width) refuse to drag rather than
+  mis-slide.
 
 ### Fixed
 

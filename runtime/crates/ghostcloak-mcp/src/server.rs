@@ -4370,7 +4370,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "GEETEST SLIDE SOLVER: solve the GeeTest v3-style slide puzzle from the live page, then perform the human drag itself. Extracts the three canvases (bg, puzzle slice, full reference bg) via toDataURL, finds the hole with |bg-fullbg| diff + largest-blob + morphological closing (the JPEG-noise trap), measures the piece's solid-alpha left edge, and drags the slider by hole_x0 - piece_x0 with the engine's humanized mouse. Returns JSON {drag_x, hole: [x0, x1], piece_x0}. Call AFTER the challenge popup is open. No vision model, pure pixel math."
+        description = "GEETEST SLIDE SOLVER: solve the GeeTest slide puzzle from the live page, then perform the human drag itself. Canvas mode (v3): extracts the three canvases (bg, puzzle slice, full reference bg) via toDataURL. Div mode (GeeTest v4 adaptive, no canvas anywhere): falls back to the div background-image layers (.geetest_bg / .geetest_slice_bg / .geetest_fullbg) and reports which path it took as 'source' ('canvas' or 'div:<selector>'). Finds the hole with |bg-fullbg| diff + largest-blob + morphological closing, or — when the challenge ships no fullbg — with brightness-invariant cross-correlation of the slice into the bg; measures the piece's solid-alpha left edge and drags by (hole_x - piece_x - slice_offset) with the engine's humanized mouse. Slider handle resolution falls back .geetest_slider_button -> .geetest_btn -> .geetest_btnFix. Returns JSON {drag_x, dragged, source}. Call AFTER the challenge popup is open. No vision model, pure pixel math."
     )]
     async fn page_geetest_slide(
         &self,
@@ -4388,7 +4388,13 @@ impl GhostcloakServer {
             .page(&page_id)
             .await
             .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
-        // 1. Grab the three canvases as data URLs + register the slider ref.
+        // 1. Grab the challenge art + register the slider ref. Canvas mode
+        //    (v3): the three canvases via toDataURL. Div mode (v4 adaptive,
+        //    no canvas on the page): the div background-image layers, with
+        //    their rects and computed background geometry — the URLs come
+        //    back as data and RUST fetches them (page_geetest_click does
+        //    the same) because an in-page Image() load is async and the
+        //    Juggler Runtime.evaluate scheme has no awaitPromise.
         let slider_js = match &slider_ref {
             Some(r) => serde_json::to_string(r).unwrap_or_default(),
             None => "null".into(),
@@ -4396,19 +4402,62 @@ impl GhostcloakServer {
         let js = format!(
             r#"(function() {{
   window.__gfxRefs = window.__gfxRefs || new Map();
-  var bg = document.querySelector('canvas.geetest_canvas_bg');
-  var sl = document.querySelector('canvas.geetest_canvas_slice');
-  var fb = document.querySelector('canvas.geetest_canvas_fullbg');
-  if (!bg || !sl) return JSON.stringify({{err: 'canvases missing — is the slide challenge open?'}});
+  function canvasData(sel) {{
+    var el = document.querySelector(sel);
+    if (!el || !el.width || !el.height) return null;
+    try {{ return el.toDataURL(); }} catch (e) {{ return null; }}
+  }}
+  var cBg = canvasData('canvas.geetest_canvas_bg');
+  var cSl = canvasData('canvas.geetest_canvas_slice');
+  var cFb = canvasData('canvas.geetest_canvas_fullbg');
+  function layer(sel) {{
+    var el = document.querySelector(sel);
+    if (!el) return null;
+    var cs = getComputedStyle(el);
+    var m = (cs.backgroundImage || '').match(/url\(["']?([^"')]+)["']?\)/);
+    if (!m || !m[1]) return null;
+    var r = el.getBoundingClientRect();
+    return {{sel: sel, url: m[1], x: r.x, y: r.y, w: r.width, h: r.height,
+            size: cs.backgroundSize, pos: cs.backgroundPosition}};
+  }}
+  var mode = null;
+  var dBg = null, dSl = null, dFb = null;
+  if (cBg && cSl) {{
+    mode = 'canvas';
+  }} else {{
+    dBg = layer('.geetest_bg');
+    dSl = layer('.geetest_slice_bg');
+    if (dBg && dSl) {{ mode = 'div'; dFb = layer('.geetest_fullbg'); }}
+  }}
+  if (!mode) {{
+    return JSON.stringify({{err: 'canvases missing — neither canvas (.geetest_canvas_bg / ' +
+      '.geetest_canvas_slice) nor div background-image (.geetest_bg / .geetest_slice_bg / ' +
+      '.geetest_fullbg) is on the page; is the slide challenge open?'}});
+  }}
   var btn = {slider_js} !== null && (window.__gfxRefs.get({slider_js}) || null);
   if (!btn) {{
-    btn = document.querySelector('.geetest_slider_button');
+    var sels = ['.geetest_slider_button', '.geetest_btn', '.geetest_btnFix',
+                '.geetest_slider [class*=geetest_btn]', '[class*=geetest_btn]'];
+    for (var i = 0; i < sels.length && !btn; i++) {{
+      var cand = document.querySelectorAll(sels[i]);
+      for (var j = 0; j < cand.length; j++) {{
+        if (String(cand[j].className).indexOf('geetest_btn_click') >= 0) continue;
+        btn = cand[j];
+        break;
+      }}
+    }}
     if (btn) window.__gfxRefs.set('gs_btn', btn);
   }}
-  if (!btn) return JSON.stringify({{err: 'slider handle not found'}});
-  try {{
-    return JSON.stringify({{bg: bg.toDataURL(), sl: sl.toDataURL(), fb: fb.toDataURL(), ref: 'gs_btn'}});
-  }} catch(e) {{ return JSON.stringify({{err: 'tainted canvas: ' + e.message}}); }}
+  if (!btn) {{
+    return JSON.stringify({{err: 'slider handle not found — tried the given ref, ' +
+      '.geetest_slider_button, .geetest_btn, .geetest_btnFix, [class*=geetest_btn]; ' +
+      'is the slide challenge open?'}});
+  }}
+  if (mode === 'canvas') {{
+    return JSON.stringify({{bg: cBg, sl: cSl, fb: cFb, ref: 'gs_btn', source: 'canvas'}});
+  }}
+  return JSON.stringify({{div: {{bg: dBg, sl: dSl, fb: dFb}}, ref: 'gs_btn',
+                         source: 'div:' + dBg.sel.replace(/^\./, '')}});
 }})()"#
         );
         let out = page
@@ -4421,29 +4470,155 @@ impl GhostcloakServer {
         if let Some(err) = v.get("err").and_then(|e| e.as_str()).map(|e| e.to_string()) {
             return Err(rmcp::model::ErrorData::internal_error(err, None));
         }
-        let b64 = |k: &str| -> Vec<u8> {
-            v.get(k)
-                .and_then(|x| x.as_str())
-                .and_then(|d| d.split(',').nth(1))
-                .map(|p| {
-                    use base64::Engine as _;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(p)
-                        .unwrap_or_default()
+        let source = v
+            .get("source")
+            .and_then(|x| x.as_str())
+            .unwrap_or("canvas");
+        let drag_x: i64 = if source.starts_with("div") {
+            // ---- v4 adaptive: div background-image layers, no canvas ----
+            fn to_err(e: anyhow::Error) -> rmcp::model::ErrorData {
+                rmcp::model::ErrorData::internal_error(e.to_string(), None)
+            }
+            async fn fetch_img(url: &str) -> Result<image::DynamicImage, rmcp::model::ErrorData> {
+                let bytes = reqwest::get(url)
+                    .await
+                    .map_err(|e| {
+                        rmcp::model::ErrorData::internal_error(
+                            format!("div fallback: fetch {url}: {e}"),
+                            None,
+                        )
+                    })?
+                    .bytes()
+                    .await
+                    .map_err(|e| {
+                        rmcp::model::ErrorData::internal_error(
+                            format!("div fallback: read {url}: {e}"),
+                            None,
+                        )
+                    })?
+                    .to_vec();
+                image::load_from_memory(&bytes).map_err(|e| {
+                    rmcp::model::ErrorData::internal_error(
+                        format!("div fallback: decode {url}: {e}"),
+                        None,
+                    )
                 })
-                .unwrap_or_default()
+            }
+            let div = v
+                .get("div")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let at = |k: &str| div.get(k).cloned().unwrap_or(serde_json::Value::Null);
+            let num = |o: &serde_json::Value, k: &str| {
+                o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0)
+            };
+            let txt = |o: &serde_json::Value, k: &str| {
+                o.get(k)
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let url = |o: &serde_json::Value| txt(o, "url");
+            let (bg_o, sl_o, fb_o) = (at("bg"), at("sl"), at("fb"));
+            let (bg_url, sl_url) = (url(&bg_o), url(&sl_o));
+            if bg_url.is_empty() || sl_url.is_empty() {
+                return Err(rmcp::model::ErrorData::internal_error(
+                    "div fallback: .geetest_bg / .geetest_slice_bg exposed no \
+                     background-image URL"
+                        .into(),
+                    None,
+                ));
+            }
+            let render = |img: &image::DynamicImage, o: &serde_json::Value, sel: &str| {
+                crate::geetest::render_bg_layer(
+                    img,
+                    num(o, "w"),
+                    num(o, "h"),
+                    &txt(o, "size"),
+                    &txt(o, "pos"),
+                )
+                .map_err(|e| {
+                    rmcp::model::ErrorData::internal_error(
+                        format!("div fallback: render {sel}: {e}"),
+                        None,
+                    )
+                })
+            };
+            let bg_raw = fetch_img(&bg_url).await?;
+            let sl_raw = fetch_img(&sl_url).await?;
+            let bg_css = render(&bg_raw, &bg_o, ".geetest_bg")?;
+            let bg_g = image::DynamicImage::ImageRgba8(bg_css).to_luma8();
+            let sl_css = render(&sl_raw, &sl_o, ".geetest_slice_bg")?;
+            // fullbg is optional — v4 adaptive ships without it, which is
+            // what geetest::slide_gap_no_full exists for.
+            let fb_url = url(&fb_o);
+            let fb_g = if fb_url.is_empty() {
+                None
+            } else {
+                let raw = fetch_img(&fb_url).await?;
+                let css = render(&raw, &fb_o, ".geetest_fullbg")?;
+                let g = image::DynamicImage::ImageRgba8(css).to_luma8();
+                if g.dimensions() == bg_g.dimensions() {
+                    Some(g)
+                } else {
+                    None
+                }
+            };
+            // The slice element's left edge relative to the bg element's is
+            // the drag offset the gap is measured on top of.
+            let offx = num(&sl_o, "x") - num(&bg_o, "x");
+            let gap = match &fb_g {
+                Some(f) => crate::geetest::slide_gap(&bg_g, &sl_css, f)
+                    .or_else(|_| crate::geetest::slide_gap_no_full(&bg_g, &sl_css))
+                    .map_err(to_err)?,
+                None => crate::geetest::slide_gap_no_full(&bg_g, &sl_css).map_err(to_err)?,
+            };
+            let drag = (gap as f64 - offx).round();
+            let bg_w = bg_g.width() as f64;
+            if !(0.0..=bg_w).contains(&drag) {
+                return Err(rmcp::model::ErrorData::internal_error(
+                    format!(
+                        "div fallback: implausible drag {drag}px (bg is {bg_w}px wide) \
+                         — refusing to drag"
+                    ),
+                    None,
+                ));
+            }
+            drag as i64
+        } else {
+            let b64 = |k: &str| -> Vec<u8> {
+                v.get(k)
+                    .and_then(|x| x.as_str())
+                    .and_then(|d| d.split(',').nth(1))
+                    .map(|p| {
+                        use base64::Engine as _;
+                        base64::engine::general_purpose::STANDARD
+                            .decode(p)
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default()
+            };
+            let bg = image::load_from_memory(&b64("bg"))
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+                .to_luma8();
+            let sl = image::load_from_memory(&b64("sl"))
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+                .to_rgba8();
+            let fb_bytes = b64("fb");
+            let gap = if fb_bytes.is_empty() {
+                // No fullbg reference (v4, or a challenge that ships none):
+                // correlate the slice into the bg instead of diffing.
+                crate::geetest::slide_gap_no_full(&bg, &sl)
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+            } else {
+                let fb = image::load_from_memory(&fb_bytes)
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+                    .to_luma8();
+                crate::geetest::slide_gap(&bg, &sl, &fb)
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+            };
+            gap as i64
         };
-        let bg = image::load_from_memory(&b64("bg"))
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
-            .to_luma8();
-        let sl = image::load_from_memory(&b64("sl"))
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
-            .to_rgba8();
-        let fb = image::load_from_memory(&b64("fb"))
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
-            .to_luma8();
-        let drag_x = crate::geetest::slide_gap(&bg, &sl, &fb)
-            .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         // 2. Human drag.
         page.drag_ref("gs_btn", "", drag_x as f64, 0.0)
             .await
@@ -4458,6 +4633,7 @@ impl GhostcloakServer {
             serde_json::to_string_pretty(&serde_json::json!({
                 "drag_x": drag_x,
                 "dragged": true,
+                "source": source,
             }))
             .unwrap_or_default(),
         ))

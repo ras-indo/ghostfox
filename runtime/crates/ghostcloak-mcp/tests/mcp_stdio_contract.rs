@@ -152,6 +152,8 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
         "browser_exec",
         "page_wait_for_text",
         "page_wait_rate_limit",
+        "page_clipboard",
+        "page_video",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }
@@ -160,8 +162,9 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
     // update this list deliberately — never silently drop tools.
     // Batch 1 (9) + batch 2 (4) + dialog (1) + emulate (1) + research-4 (4) + fill_form (1) +
     // research-5 (2) + exec (2: browser_exec, page_wait_for_text) +
-    // rate-limit (1: page_wait_rate_limit) = 73.
-    assert_eq!(names.len(), 73, "tools: {names:?}");
+    // rate-limit (1: page_wait_rate_limit) +
+    // clipboard/video (2: page_clipboard, page_video) = 75.
+    assert_eq!(names.len(), 75, "tools: {names:?}");
 
     let generated = request(
         &mut child,

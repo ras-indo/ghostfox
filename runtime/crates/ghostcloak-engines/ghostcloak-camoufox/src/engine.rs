@@ -522,6 +522,17 @@ impl CamoufoxEngine {
                                     *handle2.frame_id.lock().await = None;
                                     *handle2.main_frame_id.lock().await = None;
                                 }
+                                Some("Page.videoRecordingStarted") => {
+                                    if let Some(f) =
+                                        msg.pointer("/params/file").and_then(|v| v.as_str())
+                                    {
+                                        *handle2.video_file.lock().await = Some(f.to_string());
+                                    }
+                                    handle2.video_recording.store(true, Ordering::SeqCst);
+                                }
+                                Some("Page.videoRecordingFinished") => {
+                                    handle2.video_recording.store(false, Ordering::SeqCst);
+                                }
                                 Some("Page.navigationCommitted") => {
                                     if let Some(fid) =
                                         msg.pointer("/params/frameId").and_then(|v| v.as_str())
@@ -607,6 +618,11 @@ pub struct CamoufoxPage {
     /// evaluate() fails fast with an actionable message instead of spinning
     /// ~30s against a context that will never come back.
     crashed: AtomicBool,
+    /// Native video recording (Browser.setVideoRecordingOptions on the
+    /// default context): path of the .webm this target is writing, plus
+    /// whether the recorder is live (Page.videoRecordingStarted/Finished).
+    video_file: Mutex<Option<String>>,
+    video_recording: AtomicBool,
 }
 
 /// Juggler frame ids: `mainframe-N` is a page's TOP frame, `subframe-N` an
@@ -698,6 +714,8 @@ impl CamoufoxPage {
             frame_id: Mutex::new(None),
             execution_context_id: Mutex::new(None),
             crashed: AtomicBool::new(false),
+            video_file: Mutex::new(None),
+            video_recording: AtomicBool::new(false),
         })
     }
 
@@ -1214,6 +1232,17 @@ impl Engine for CamoufoxEngine {
                                 *handle2.execution_context_id.lock().await = None;
                                 *handle2.frame_id.lock().await = None;
                                 *handle2.main_frame_id.lock().await = None;
+                            }
+                            if method == Some("Page.videoRecordingStarted") {
+                                if let Some(f) =
+                                    msg.pointer("/params/file").and_then(|v| v.as_str())
+                                {
+                                    *handle2.video_file.lock().await = Some(f.to_string());
+                                }
+                                handle2.video_recording.store(true, Ordering::SeqCst);
+                            }
+                            if method == Some("Page.videoRecordingFinished") {
+                                handle2.video_recording.store(false, Ordering::SeqCst);
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -2861,6 +2890,91 @@ impl PageHandle for CamoufoxPage {
                 "browser_cookies action must be get|set|clear, got {other}"
             ))),
         }
+    }
+
+    async fn video_start(
+        &self,
+        dir: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<serde_json::Value> {
+        // Native juggler recorder: Browser.setVideoRecordingOptions on the
+        // DEFAULT context (no browserContextId — Browser.newPage pages live
+        // there). Every page starts writing .webm into `dir`, and the
+        // Page.videoRecordingStarted event (session-filtered pump) hands us
+        // the exact file path.
+        std::fs::create_dir_all(dir)
+            .map_err(|e| GhostError::PageOp(format!("video dir create failed: {e}")))?;
+        self.conn
+            .request(
+                "Browser.setVideoRecordingOptions",
+                serde_json::json!({
+                    "options": { "dir": dir, "width": width, "height": height }
+                }),
+            )
+            .await?;
+        // Bounded wait for the Started event (recorder spin-up is async).
+        let mut file = None;
+        for _ in 0..30 {
+            if self.video_recording.load(Ordering::SeqCst) {
+                file = self.video_file.lock().await.clone();
+                if file.is_some() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        Ok(serde_json::json!({
+            "recording": true,
+            "dir": dir,
+            "file": file,
+        }))
+    }
+
+    async fn video_stop(&self) -> Result<serde_json::Value> {
+        // Options omitted → undefined → the context stops recording every
+        // page (BrowserContext.setVideoRecordingOptions stops existing ones).
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.conn
+                .request("Browser.setVideoRecordingOptions", serde_json::json!({})),
+        )
+        .await;
+        let file = self.video_file.lock().await.clone();
+        // The encoder finalizes the container after stop — poll until the
+        // file size stops growing (bounded ~5s) so callers get a valid .webm.
+        let mut bytes = 0u64;
+        if let Some(f) = &file {
+            let mut last = u64::MAX;
+            for _ in 0..20 {
+                bytes = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+                if bytes > 0 && bytes == last {
+                    break;
+                }
+                last = bytes;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+        self.video_recording.store(false, Ordering::SeqCst);
+        Ok(serde_json::json!({
+            "recording": false,
+            "file": file,
+            "bytes": bytes,
+        }))
+    }
+
+    async fn video_status(&self) -> Result<serde_json::Value> {
+        let file = self.video_file.lock().await.clone();
+        let bytes = file
+            .as_ref()
+            .and_then(|f| std::fs::metadata(f).ok())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Ok(serde_json::json!({
+            "recording": self.video_recording.load(Ordering::SeqCst),
+            "file": file,
+            "bytes": bytes,
+        }))
     }
 
     async fn grant_permissions(&self, origin: &str, permissions: &[String]) -> Result<()> {

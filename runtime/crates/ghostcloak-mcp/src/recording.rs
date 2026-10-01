@@ -67,6 +67,14 @@ impl Recorder {
         self.root.join(safe)
     }
 
+    /// Directory for native page video recordings (.webm) of a session,
+    /// created on demand — the engine's recorder streams straight into it.
+    pub fn video_dir(&self, session_id: &str) -> PathBuf {
+        let dir = self.session_dir(session_id).join("video");
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
     /// Append one action to the session's event log.
     pub fn record(
         &self,

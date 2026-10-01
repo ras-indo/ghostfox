@@ -229,6 +229,33 @@ pub trait PageHandle: Send + Sync {
             "screenshot not supported by this engine".into(),
         ))
     }
+    /// Native page video recording → `.webm` under `dir` (mobile-mcp
+    /// start/stop_screen_recording parity). `video_start` begins capturing
+    /// (bounded wait for the recorder to hand back its file path),
+    /// `video_stop` finalizes the container and reports `{file, bytes}`,
+    /// `video_status` reports `{recording, file, bytes}` without touching
+    /// the recorder. Engines without recording support return an error
+    /// naming the limitation.
+    async fn video_start(
+        &self,
+        _dir: &str,
+        _width: u32,
+        _height: u32,
+    ) -> Result<serde_json::Value> {
+        Err(crate::error::GhostError::PageOp(
+            "video recording not supported by this engine".into(),
+        ))
+    }
+    async fn video_stop(&self) -> Result<serde_json::Value> {
+        Err(crate::error::GhostError::PageOp(
+            "video recording not supported by this engine".into(),
+        ))
+    }
+    async fn video_status(&self) -> Result<serde_json::Value> {
+        Err(crate::error::GhostError::PageOp(
+            "video recording not supported by this engine".into(),
+        ))
+    }
     /// Semantic snapshot: walk the page (including shadow roots), return
     /// interactive elements with stable refs an agent can act on.
     async fn a11y_snapshot(&self) -> Result<A11ySnapshot> {

@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`page_clipboard`** — read/write the system clipboard via
+  `navigator.clipboard` (mobile-mcp `mobile_clipboard` parity):
+  `action=read` returns the current text, `action=write` places text
+  (auto-grants `clipboard-read`/`clipboard-write` for the page origin
+  first, so no on-page prompt blocks a copy/paste or 2FA-code flow).
+- **`page_video`** — native page recording → `.webm` in the session
+  recordings dir (mobile-mcp `start/stop_screen_recording` parity).
+  Driven by juggler's OWN recorder (`Browser.setVideoRecordingOptions`
+  on the default context → `nsScreencastService`, the same pipeline
+  Playwright uses for `record_video_dir` — no JS-side frame pump, no
+  re-encode cost in the agent). `start` (width/height default 1280x720)
+  keeps recording across navigations and tabs; `stop` finalizes and
+  returns `{file, bytes}` with a size-stability wait so the container is
+  fully flushed; `status` peeks without stopping. The exact file path
+  arrives via the `Page.videoRecordingStarted` event, now captured by
+  the popup and live context pumps.
+- **Tool annotations port (mobile-mcp parity)** — `#[tool(annotations)]`
+  now carries MCP `title` / `destructive_hint` metadata: `page_close`
+  and `session_close` are marked destructive (clients can warn before
+  killing a page/session), the new clipboard/video tools carry titles.
+  `page_screenshot`'s description gains mobile-mcp's anti-stale rule
+  ("NEVER cache the returned image bytes across steps").
 - **`page_screenshot` returns the image INLINE** — response is now
   `[text JSON metadata, image content block]` (mobile-mcp
   `mobile_take_screenshot` parity): the calling client SEES the screenshot

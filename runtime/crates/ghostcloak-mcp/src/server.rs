@@ -750,6 +750,31 @@ struct PermissionsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ClipboardParams {
+    session_id: String,
+    page_id: String,
+    /// read | write
+    action: String,
+    /// write: text to place on the system clipboard
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct VideoParams {
+    session_id: String,
+    page_id: String,
+    /// start | stop | status
+    action: String,
+    /// start: capture width in px (default 1280)
+    #[serde(default)]
+    width: Option<u32>,
+    /// start: capture height in px (default 720)
+    #[serde(default)]
+    height: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct DownloadParams {
     session_id: String,
     page_id: String,
@@ -1595,7 +1620,8 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Close a browsing session: shuts down the engine process, frees its memory (RAM), and deletes its ephemeral profile. ALWAYS call this when done with a session — sessions that are never closed keep consuming hundreds of MB until the server restarts. Returns 'closed'."
+        description = "Close a browsing session: shuts down the engine process, frees its memory (RAM), and deletes its ephemeral profile. ALWAYS call this when done with a session — sessions that are never closed keep consuming hundreds of MB until the server restarts. Returns 'closed'.",
+        annotations(title = "Close Session", destructive_hint = true)
     )]
     async fn session_close(
         &self,
@@ -1826,7 +1852,8 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Close a single page/tab in a session (frees its target). Use session_close to shut the whole session down."
+        description = "Close a single page/tab in a session (frees its target). Use session_close to shut the whole session down.",
+        annotations(title = "Close Page", destructive_hint = true)
     )]
     async fn page_close(
         &self,
@@ -3229,6 +3256,143 @@ impl GhostcloakServer {
         let _ = self.recorder.record(
             &session_id,
             "page_cookies",
+            Some(&page_id),
+            serde_json::json!({ "action": action }),
+        );
+        Ok(text_result(out.to_string()))
+    }
+
+    #[tool(
+        description = "SYSTEM CLIPBOARD read/write via navigator.clipboard (mobile-mcp mobile_clipboard parity). action='read' returns the current clipboard text; action='write' puts text ONTO the clipboard (text required). Grants clipboard-read + clipboard-write for the page origin first, so no on-page permission prompt blocks it. Use for copy/paste flows, grabbing 2FA/auth codes, verifying a Copy button. Returns {action, text, origin, ok}.",
+        annotations(title = "Page Clipboard")
+    )]
+    async fn page_clipboard(
+        &self,
+        Parameters(ClipboardParams {
+            session_id,
+            page_id,
+            action,
+            text,
+        }): Parameters<ClipboardParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        // Best-effort grant: an http origin may refuse, in which case the
+        // evaluate below surfaces the real NotAllowedError to the caller.
+        let origin = page
+            .evaluate("location.origin")
+            .await
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        if !origin.is_empty() && origin != "null" {
+            let _ = page
+                .grant_permissions(
+                    &origin,
+                    &["clipboard-read".to_string(), "clipboard-write".to_string()],
+                )
+                .await;
+        }
+        let out = match action.as_str() {
+            "read" => {
+                let v = page
+                    .evaluate("navigator.clipboard.readText()")
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+                serde_json::json!({
+                    "action": "read",
+                    "text": v.as_str().unwrap_or_default(),
+                    "origin": origin,
+                    "ok": true,
+                })
+            }
+            "write" => {
+                let t = text.filter(|s| !s.is_empty()).ok_or_else(|| {
+                    rmcp::model::ErrorData::invalid_params("action=write needs text", None)
+                })?;
+                let expr = format!(
+                    "navigator.clipboard.writeText({})",
+                    serde_json::to_string(&t).unwrap_or_else(|_| "\"\"".into())
+                );
+                page.evaluate(&expr)
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+                serde_json::json!({
+                    "action": "write",
+                    "text": t,
+                    "origin": origin,
+                    "ok": true,
+                })
+            }
+            other => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!("action must be read or write, got {other}"),
+                    None,
+                ))
+            }
+        };
+        let _ = self.recorder.record(
+            &session_id,
+            "page_clipboard",
+            Some(&page_id),
+            serde_json::json!({ "action": action }),
+        );
+        Ok(text_result(out.to_string()))
+    }
+
+    #[tool(
+        description = "VIDEO RECORDING of the page → .webm in the session recordings dir (mobile-mcp start/stop_screen_recording parity; native juggler screencast mux, no CPU-heavy re-encode). action='start' (width/height default 1280x720) begins capturing ALL pages of this browser session and keeps going across navigations and tabs; action='stop' finalizes the file and returns {file, bytes}; action='status' returns {recording, file, bytes} WITHOUT stopping. Typical flow: start → do the steps → stop → share the returned file (also under <recordings>/<session>/video/).",
+        annotations(title = "Page Video Recording")
+    )]
+    async fn page_video(
+        &self,
+        Parameters(VideoParams {
+            session_id,
+            page_id,
+            action,
+            width,
+            height,
+        }): Parameters<VideoParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let out = match action.as_str() {
+            "start" => {
+                let dir = self.recorder.video_dir(&session_id);
+                page.video_start(&dir.to_string_lossy(), width.unwrap_or(1280), height.unwrap_or(720))
+                    .await
+                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+            }
+            "stop" => page
+                .video_stop()
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?,
+            "status" => page
+                .video_status()
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?,
+            other => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!("action must be start, stop or status, got {other}"),
+                    None,
+                ))
+            }
+        };
+        let _ = self.recorder.record(
+            &session_id,
+            "page_video",
             Some(&page_id),
             serde_json::json!({ "action": action }),
         );
@@ -5876,7 +6040,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Capture a screenshot of a page (viewport by default, full page with full_page=true) and SEE it directly: returns [text JSON metadata, image content block] — the image goes to you inline (mobile_take_screenshot parity), plus the saved file path under the session recordings dir. Use max_dim (e.g. 1600) and format=jpeg for smaller payloads; inline is skipped (>4 MiB) with a shrink hint in the text. Feeds the live view when enabled."
+        description = "Capture a screenshot of a page (viewport by default, full page with full_page=true) and SEE it directly: returns [text JSON metadata, image content block] — the image goes to you inline (mobile_take_screenshot parity), plus the saved file path under the session recordings dir. Use max_dim (e.g. 1600) and format=jpeg for smaller payloads; inline is skipped (>4 MiB) with a shrink hint in the text. Feeds the live view when enabled. NEVER cache the returned image bytes across steps — the page keeps changing; re-capture whenever you need to look again."
     )]
     async fn page_screenshot(
         &self,

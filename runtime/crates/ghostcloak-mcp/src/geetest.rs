@@ -574,10 +574,7 @@ pub fn render_bg_layer(
         (Some(a), None) => match a {
             "top" => (0.0, 0.0),
             "bottom" => (0.0, elem_h - sh as f64),
-            "center" => (
-                (elem_w - sw as f64) / 2.0,
-                (elem_h - sh as f64) / 2.0,
-            ),
+            "center" => ((elem_w - sw as f64) / 2.0, (elem_h - sh as f64) / 2.0),
             _ => (bg_pos_offset(a, elem_w, sw as f64), 0.0),
         },
         (Some(a), Some(b)) => (

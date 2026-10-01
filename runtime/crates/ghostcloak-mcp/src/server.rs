@@ -4470,10 +4470,7 @@ impl GhostcloakServer {
         if let Some(err) = v.get("err").and_then(|e| e.as_str()).map(|e| e.to_string()) {
             return Err(rmcp::model::ErrorData::internal_error(err, None));
         }
-        let source = v
-            .get("source")
-            .and_then(|x| x.as_str())
-            .unwrap_or("canvas");
+        let source = v.get("source").and_then(|x| x.as_str()).unwrap_or("canvas");
         let drag_x: i64 = if source.starts_with("div") {
             // ---- v4 adaptive: div background-image layers, no canvas ----
             fn to_err(e: anyhow::Error) -> rmcp::model::ErrorData {
@@ -4509,9 +4506,8 @@ impl GhostcloakServer {
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
             let at = |k: &str| div.get(k).cloned().unwrap_or(serde_json::Value::Null);
-            let num = |o: &serde_json::Value, k: &str| {
-                o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0)
-            };
+            let num =
+                |o: &serde_json::Value, k: &str| o.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
             let txt = |o: &serde_json::Value, k: &str| {
                 o.get(k)
                     .and_then(|x| x.as_str())

@@ -784,10 +784,7 @@ impl CamoufoxPage {
         // second frame arrives within 1.8s (nothing changed) frame 1 stands.
         if frame.is_some() {
             let seq1 = self.screencast_seq.load(Ordering::SeqCst);
-            if let Some(sid_str) = start_res
-                .get("screencastId")
-                .and_then(|v| v.as_str())
-            {
+            if let Some(sid_str) = start_res.get("screencastId").and_then(|v| v.as_str()) {
                 let _ = self
                     .conn
                     .request_session(
@@ -797,8 +794,7 @@ impl CamoufoxPage {
                     )
                     .await;
             }
-            let deadline2 =
-                tokio::time::Instant::now() + std::time::Duration::from_millis(1800);
+            let deadline2 = tokio::time::Instant::now() + std::time::Duration::from_millis(1800);
             while tokio::time::Instant::now() < deadline2 {
                 tokio::time::sleep(std::time::Duration::from_millis(40)).await;
                 if self.screencast_seq.load(Ordering::SeqCst) > seq1 {

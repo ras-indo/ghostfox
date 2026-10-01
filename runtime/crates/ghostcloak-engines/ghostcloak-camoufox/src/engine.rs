@@ -2892,12 +2892,7 @@ impl PageHandle for CamoufoxPage {
         }
     }
 
-    async fn video_start(
-        &self,
-        dir: &str,
-        width: u32,
-        height: u32,
-    ) -> Result<serde_json::Value> {
+    async fn video_start(&self, dir: &str, width: u32, height: u32) -> Result<serde_json::Value> {
         // Native juggler recorder: Browser.setVideoRecordingOptions on the
         // DEFAULT context (no browserContextId — Browser.newPage pages live
         // there). Every page starts writing .webm into `dir`, and the

@@ -3371,9 +3371,13 @@ impl GhostcloakServer {
         let out = match action.as_str() {
             "start" => {
                 let dir = self.recorder.video_dir(&session_id);
-                page.video_start(&dir.to_string_lossy(), width.unwrap_or(1280), height.unwrap_or(720))
-                    .await
-                    .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
+                page.video_start(
+                    &dir.to_string_lossy(),
+                    width.unwrap_or(1280),
+                    height.unwrap_or(720),
+                )
+                .await
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?
             }
             "stop" => page
                 .video_stop()

@@ -8,7 +8,7 @@ use std::os::fd::AsRawFd;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -533,6 +533,15 @@ impl CamoufoxEngine {
                                 Some("Page.videoRecordingFinished") => {
                                     handle2.video_recording.store(false, Ordering::SeqCst);
                                 }
+                                Some("Page.screencastFrame") => {
+                                    if let Some(d) =
+                                        msg.pointer("/params/data").and_then(|v| v.as_str())
+                                    {
+                                        *handle2.screencast_frame.lock().await =
+                                            Some(d.to_string());
+                                        handle2.screencast_seq.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                }
                                 Some("Page.navigationCommitted") => {
                                     if let Some(fid) =
                                         msg.pointer("/params/frameId").and_then(|v| v.as_str())
@@ -618,6 +627,12 @@ pub struct CamoufoxPage {
     /// evaluate() fails fast with an actionable message instead of spinning
     /// ~30s against a context that will never come back.
     crashed: AtomicBool,
+    /// Latest Page.screencastFrame (base64 JPEG) + monotonic sequence.
+    /// The fresh-capture screenshot path reads these: Page.screenshot's
+    /// drawSnapshot serves a STALE frame on this build (scroll/DOM changes
+    /// invisible), while the native screencast track tracks reality.
+    screencast_frame: Mutex<Option<String>>,
+    screencast_seq: AtomicU64,
     /// Native video recording (Browser.setVideoRecordingOptions on the
     /// default context): path of the .webm this target is writing, plus
     /// whether the recorder is live (Page.videoRecordingStarted/Finished).
@@ -714,6 +729,8 @@ impl CamoufoxPage {
             frame_id: Mutex::new(None),
             execution_context_id: Mutex::new(None),
             crashed: AtomicBool::new(false),
+            screencast_frame: Mutex::new(None),
+            screencast_seq: AtomicU64::new(0),
             video_file: Mutex::new(None),
             video_recording: AtomicBool::new(false),
         })
@@ -1243,6 +1260,14 @@ impl Engine for CamoufoxEngine {
                             }
                             if method == Some("Page.videoRecordingFinished") {
                                 handle2.video_recording.store(false, Ordering::SeqCst);
+                            }
+                            if method == Some("Page.screencastFrame") {
+                                if let Some(d) =
+                                    msg.pointer("/params/data").and_then(|v| v.as_str())
+                                {
+                                    *handle2.screencast_frame.lock().await = Some(d.to_string());
+                                    handle2.screencast_seq.fetch_add(1, Ordering::SeqCst);
+                                }
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -3408,6 +3433,26 @@ impl PageHandle for CamoufoxPage {
         use base64::Engine as _;
         let sid = self.session_id().await?;
 
+        // FRESH CAPTURE: viewport shots go through the native screencast
+        // service (nsScreencastService — same track the video recorder
+        // uses), because Page.screenshot's drawSnapshot serves a STALE
+        // frame on this build: scrollY 0→900 and DOM mutations came back
+        // byte-identical, while screencast frames track every change
+        // (verified against recorded video). The frame arrives as JPEG;
+        // the server re-encodes to PNG. full_page keeps drawSnapshot —
+        // screencast is viewport-only.
+        if !full_page {
+            match self.screencast_shot(&sid).await {
+                Some(jpeg) => return Ok(jpeg),
+                None => {
+                    tracing::debug!(
+                        target: "ghostcloak::camoufox",
+                        "screenshot: screencast capture unavailable — falling back to drawSnapshot"
+                    );
+                }
+            }
+        }
+
         // The Juggler screenshot takes an explicit clip: viewport shots use
         // the window size, full-page shots measure the scrollable document.
         let dims_expr = if full_page {
@@ -3456,6 +3501,62 @@ impl PageHandle for CamoufoxPage {
         base64::engine::general_purpose::STANDARD
             .decode(b64)
             .map_err(|e| GhostError::Protocol(format!("screenshot base64: {e}")))
+    }
+
+    /// One fresh viewport frame via Page.startScreencast → the native
+    /// nsScreencastService track (max 1 frame in flight, first frame needs
+    /// no ack). Returns base64-decoded JPEG bytes, or None when the
+    /// service is unavailable / produced no frame within 3s — the caller
+    /// falls back to the drawSnapshot path. Screencast is always stopped
+    /// on every exit so a failed capture never leaks the service.
+    async fn screencast_shot(&self, sid: &str) -> Option<Vec<u8>> {
+        use base64::Engine as _;
+        let dims = self
+            .evaluate("JSON.stringify([window.innerWidth, window.innerHeight])")
+            .await
+            .ok()?;
+        let (w, h) = dims
+            .as_str()
+            .and_then(|s| {
+                let parts: Vec<u32> = s
+                    .trim_matches(|c| c == '"' || c == '[' || c == ']')
+                    .split(',')
+                    .filter_map(|p| p.trim().parse().ok())
+                    .collect();
+                (parts.len() == 2).then_some((parts[0], parts[1]))
+            })
+            .unwrap_or((1280, 800));
+        let seq0 = self.screencast_seq.load(Ordering::SeqCst);
+        *self.screencast_frame.lock().await = None;
+        if self
+            .conn
+            .request_session(
+                "Page.startScreencast",
+                serde_json::json!({ "width": w, "height": h, "quality": 95 }),
+                Some(sid),
+            )
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(3000);
+        let mut frame = None;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            if self.screencast_seq.load(Ordering::SeqCst) > seq0 {
+                frame = self.screencast_frame.lock().await.clone();
+                break;
+            }
+        }
+        let _ = self
+            .conn
+            .request_session("Page.stopScreencast", serde_json::json!({}), Some(sid))
+            .await;
+        let b64 = frame?;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .ok()
     }
 
     async fn evaluate(&self, expression: &str) -> Result<serde_json::Value> {

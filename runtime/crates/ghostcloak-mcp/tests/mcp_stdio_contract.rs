@@ -131,6 +131,7 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
         "page_markdown",
         "page_batch",
         "page_wait_for_idle",
+        "page_wait_for_timeout",
         "extract_tokens",
         "detect_anti_bot",
         "page_storage",
@@ -163,8 +164,9 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
     // Batch 1 (9) + batch 2 (4) + dialog (1) + emulate (1) + research-4 (4) + fill_form (1) +
     // research-5 (2) + exec (2: browser_exec, page_wait_for_text) +
     // rate-limit (1: page_wait_rate_limit) +
-    // clipboard/video (2: page_clipboard, page_video) = 75.
-    assert_eq!(names.len(), 75, "tools: {names:?}");
+    // clipboard/video (2: page_clipboard, page_video) +
+    // sleep (1: page_wait_for_timeout) = 76.
+    assert_eq!(names.len(), 76, "tools: {names:?}");
 
     let generated = request(
         &mut child,

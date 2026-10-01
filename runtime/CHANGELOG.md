@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`page_wait_for_timeout`** — explicit sleep/delay tool (blocked
+  `timeout_ms` 1–60000, returns `{waited_ms, url}`). Fills the
+  missing-tool gap for "wait until the challenge widget paints" when
+  `page_wait_for_idle` returns too early; validates session/page FIRST
+  so a dead session fails immediately instead of sleeping uselessly.
+- **Fresh screenshot capture (stale-frame fix)** — viewport
+  `page_screenshot` now captures through juggler's NATIVE screencast
+  track (`Page.startScreencast` → `nsScreencastService` → one JPEG
+  frame → server re-encodes to PNG) instead of `Page.screenshot`'s
+  `drawSnapshot`, which on this build serves a STALE frame: scroll
+  (scrollY 0→900) and DOM mutations came back byte-identical while the
+  screencast/video track visibly followed every change. Fallback to
+  the old drawSnapshot path when the service yields no frame in 3s
+  (screencast is always stopped on every exit). `full_page` keeps
+  drawSnapshot (screencast is viewport-only).
+
 - **`page_clipboard`** — read/write the system clipboard via
   `navigator.clipboard` (mobile-mcp `mobile_clipboard` parity):
   `action=read` returns the current text, `action=write` places text
@@ -69,6 +85,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of a hammer.
 
 ### Fixed
+
+- **`page_open` no longer fails silently** — a navigation that dies
+  before commit (e.g. `NS_ERROR_NET_EMPTY_RESPONSE`) used to return a
+  healthy-looking page id that sat on `about:blank` forever, making
+  every follow-up call fail confusingly. `page_open` now polls briefly
+  past the DOM wait and, if the page never left `about:`, closes it and
+  returns an explicit `NAVIGATION FAILED` error with remediation hints.
+- **Actionable `session not found`** — the error now explains the two
+  real causes (closed vs server restart) and what to call next
+  (`session_list` / `session_create`, `profile_dir` to reuse identity).
+  `session_create`'s description documents that every call mints a NEW
+  random identity unless the same `profile_dir` is passed.
 
 - **Execution-context recovery overhaul — `Failed to find execution
   context with id = mainframe-N`** — the context pumps (startup, live,

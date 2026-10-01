@@ -640,6 +640,14 @@ struct IdleParams {
     idle_ms: Option<u64>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct WaitForTimeoutParams {
+    session_id: String,
+    page_id: String,
+    /// How long to block, in ms (clamped to 1..=60000).
+    timeout_ms: u64,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct TokensParams {
     session_id: String,
@@ -908,7 +916,14 @@ impl GhostcloakServer {
             .sessions
             .get(id)
             .cloned()
-            .ok_or_else(|| format!("session `{id}` not found"))
+            .ok_or_else(|| {
+                format!(
+                    "session `{id}` not found — it was closed, or the server restarted \
+                     (restarts wipe every session). Call session_list to see what is alive, \
+                     then session_create for a new session (pass profile_dir to reuse the \
+                     same identity)."
+                )
+            })
     }
 }
 
@@ -1512,7 +1527,7 @@ const BROWSEREXEC_JS: &str = r#"(()=>{
 #[tool_router]
 impl GhostcloakServer {
     #[tool(
-        description = "Create a new browsing session: launches the engine with a fresh coherent identity. Returns session_id."
+        description = "Create a new browsing session: launches the engine with a fresh coherent identity. Returns session_id. NOTE: each call generates a NEW random identity (label, platform, fingerprint) — pass the same profile_dir to reuse one persistent profile/identity across sessions. Sessions die when the server restarts; always pair with session_close when done.",
     )]
     async fn session_create(
         &self,
@@ -1731,6 +1746,51 @@ impl GhostcloakServer {
                         target: "ghostcloak::dialog",
                         "page_open auto-arm dialog handler failed for {new_id}: {e}"
                     );
+                }
+                // LOUD NAVIGATION FAILURE: a load that dies before commit
+                // (NS_ERROR_NET_EMPTY_RESPONSE, refused, DNS, QUIC stall)
+                // leaves the page sitting on about:blank with NO error —
+                // every follow-up call then fails confusingly ("still
+                // about:blank", eval timeouts). Poll briefly past the DOM
+                // wait, then surface the failure instead of returning
+                // success. about:/data: targets are exempt (they land
+                // instantly on a document named about:...).
+                let target_l = url.trim().to_ascii_lowercase();
+                let target_is_named = target_l.starts_with("about:")
+                    || target_l.starts_with("data:");
+                if !target_is_named {
+                    let deadline = tokio::time::Instant::now()
+                        + std::time::Duration::from_secs(10);
+                    loop {
+                        let settled = settled_url(&page).await;
+                        if !settled.is_empty() && !settled.starts_with("about:") {
+                            break;
+                        }
+                        if tokio::time::Instant::now() >= deadline {
+                            let _ = page.close().await;
+                            let _ = self.recorder.record(
+                                &session_id,
+                                "page_open",
+                                Some(&new_id),
+                                serde_json::json!({
+                                    "url": url,
+                                    "ok": false,
+                                    "error": "page never left about:blank",
+                                }),
+                            );
+                            return Err(rmcp::model::ErrorData::internal_error(
+                                format!(
+                                    "NAVIGATION FAILED: `{url}` never left about:blank — the load \
+                                     died before commit (server closed the connection, the site is \
+                                     unreachable from this host, or it is blocking this client). \
+                                     The half-open page was closed. Verify the URL with curl from \
+                                     this machine, then retry (or open a different URL)."
+                                ),
+                                None,
+                            ));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
                 }
             }
         }
@@ -2713,6 +2773,45 @@ impl GhostcloakServer {
             serde_json::to_string_pretty(&serde_json::json!({
                 "completed": done.len(),
                 "steps": done,
+            }))
+            .unwrap_or_default(),
+        ))
+    }
+
+    #[tool(
+        description = "SLEEP/DELAY: block for timeout_ms (1-60000), then return {waited_ms, url}. Use when a challenge widget needs render/paint time and page_wait_for_idle returns too early (e.g. captcha iframe still painting). Validates the session/page first — a dead session fails immediately instead of sleeping uselessly."
+    )]
+    async fn page_wait_for_timeout(
+        &self,
+        Parameters(WaitForTimeoutParams {
+            session_id,
+            page_id,
+            timeout_ms,
+        }): Parameters<WaitForTimeoutParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        // Liveness check up front: sleeping N seconds for a session that
+        // already died is pure waste — fail fast with the clear error.
+        let session = self
+            .session(&session_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let page = session
+            .page(&page_id)
+            .await
+            .map_err(|e| rmcp::model::ErrorData::invalid_params(e.to_string(), None))?;
+        let ms = timeout_ms.clamp(1, 60_000);
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        let url = settled_url(&page).await;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_wait_for_timeout",
+            Some(&page_id),
+            serde_json::json!({ "waited_ms": ms }),
+        );
+        Ok(text_result(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "waited_ms": ms,
+                "url": url,
             }))
             .unwrap_or_default(),
         ))
@@ -6123,6 +6222,17 @@ impl GhostcloakServer {
             .await
             .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
         let orig_bytes = png.len();
+        // The fresh-capture path (engine screencast) hands back a JPEG
+        // compositor frame — the contract below is PNG bytes (record
+        // extension, IHDR dims, inline image), so normalize right here.
+        if png.len() > 2 && png[0] == 0xFF && png[1] == 0xD8 {
+            let img = image::load_from_memory(&png)
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            let mut buf = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+                .map_err(|e| rmcp::model::ErrorData::internal_error(e.to_string(), None))?;
+            png = buf;
+        }
         // Optional post-process (from chrome-devtools/browser-use): downscale + re-encode.
         // Track source dims so we can hand the client a coordinate mapping when scaled.
         let mut scaled_from: Option<(u32, u32)> = None;

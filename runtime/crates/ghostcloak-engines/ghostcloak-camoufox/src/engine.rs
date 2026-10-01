@@ -745,7 +745,7 @@ impl CamoufoxPage {
             .unwrap_or((1280, 800));
         let seq0 = self.screencast_seq.load(Ordering::SeqCst);
         *self.screencast_frame.lock().await = None;
-        if self
+        match self
             .conn
             .request_session(
                 "Page.startScreencast",
@@ -753,9 +753,18 @@ impl CamoufoxPage {
                 Some(sid),
             )
             .await
-            .is_err()
         {
-            return None;
+            Ok(_) => tracing::debug!(
+                target: "ghostcloak::camoufox",
+                "screencast_shot: started {w}x{h} q=95 seq0={seq0}"
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    target: "ghostcloak::camoufox",
+                    "screencast_shot: startScreencast rejected: {e}"
+                );
+                return None;
+            }
         }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(3000);
         let mut frame = None;
@@ -770,7 +779,18 @@ impl CamoufoxPage {
             .conn
             .request_session("Page.stopScreencast", serde_json::json!({}), Some(sid))
             .await;
-        let b64 = frame?;
+        let Some(b64) = frame else {
+            tracing::debug!(
+                target: "ghostcloak::camoufox",
+                "screencast_shot: no frame within 3s (seq0={seq0}) - drawSnapshot fallback"
+            );
+            return None;
+        };
+        tracing::debug!(
+            target: "ghostcloak::camoufox",
+            "screencast_shot: frame ok b64_len={}",
+            b64.len()
+        );
         base64::engine::general_purpose::STANDARD.decode(b64).ok()
     }
     fn new(conn: Arc<JugglerConnection>, target_id: String) -> Arc<Self> {
@@ -3496,7 +3516,14 @@ impl PageHandle for CamoufoxPage {
         // screencast is viewport-only.
         if !full_page {
             match self.screencast_shot(&sid).await {
-                Some(jpeg) => return Ok(jpeg),
+                Some(jpeg) => {
+                    tracing::debug!(
+                        target: "ghostcloak::camoufox",
+                        "screenshot: fresh screencast frame used ({} bytes)",
+                        jpeg.len()
+                    );
+                    return Ok(jpeg);
+                }
                 None => {
                     tracing::debug!(
                         target: "ghostcloak::camoufox",

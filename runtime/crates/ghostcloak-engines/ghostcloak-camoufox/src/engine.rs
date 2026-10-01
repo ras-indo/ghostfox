@@ -720,6 +720,60 @@ mod same_document_tests {
 use tokio::sync::Mutex;
 
 impl CamoufoxPage {
+
+    /// One fresh viewport frame via Page.startScreencast → the native
+    /// nsScreencastService track (max 1 frame in flight, first frame needs
+    /// no ack). Returns base64-decoded JPEG bytes, or None when the
+    /// service is unavailable / produced no frame within 3s — the caller
+    /// falls back to the drawSnapshot path. Screencast is always stopped
+    /// on every exit so a failed capture never leaks the service.
+    async fn screencast_shot(&self, sid: &str) -> Option<Vec<u8>> {
+        use base64::Engine as _;
+        let dims = self
+            .evaluate("JSON.stringify([window.innerWidth, window.innerHeight])")
+            .await
+            .ok()?;
+        let (w, h) = dims
+            .as_str()
+            .and_then(|s| {
+                let parts: Vec<u32> = s
+                    .trim_matches(|c| c == '"' || c == '[' || c == ']')
+                    .split(',')
+                    .filter_map(|p| p.trim().parse().ok())
+                    .collect();
+                (parts.len() == 2).then_some((parts[0], parts[1]))
+            })
+            .unwrap_or((1280, 800));
+        let seq0 = self.screencast_seq.load(Ordering::SeqCst);
+        *self.screencast_frame.lock().await = None;
+        if self
+            .conn
+            .request_session(
+                "Page.startScreencast",
+                serde_json::json!({ "width": w, "height": h, "quality": 95 }),
+                Some(sid),
+            )
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(3000);
+        let mut frame = None;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            if self.screencast_seq.load(Ordering::SeqCst) > seq0 {
+                frame = self.screencast_frame.lock().await.clone();
+                break;
+            }
+        }
+        let _ = self
+            .conn
+            .request_session("Page.stopScreencast", serde_json::json!({}), Some(sid))
+            .await;
+        let b64 = frame?;
+        base64::engine::general_purpose::STANDARD.decode(b64).ok()
+    }
     fn new(conn: Arc<JugglerConnection>, target_id: String) -> Arc<Self> {
         Arc::new(Self {
             conn,
@@ -3501,60 +3555,6 @@ impl PageHandle for CamoufoxPage {
         base64::engine::general_purpose::STANDARD
             .decode(b64)
             .map_err(|e| GhostError::Protocol(format!("screenshot base64: {e}")))
-    }
-
-    /// One fresh viewport frame via Page.startScreencast → the native
-    /// nsScreencastService track (max 1 frame in flight, first frame needs
-    /// no ack). Returns base64-decoded JPEG bytes, or None when the
-    /// service is unavailable / produced no frame within 3s — the caller
-    /// falls back to the drawSnapshot path. Screencast is always stopped
-    /// on every exit so a failed capture never leaks the service.
-    async fn screencast_shot(&self, sid: &str) -> Option<Vec<u8>> {
-        use base64::Engine as _;
-        let dims = self
-            .evaluate("JSON.stringify([window.innerWidth, window.innerHeight])")
-            .await
-            .ok()?;
-        let (w, h) = dims
-            .as_str()
-            .and_then(|s| {
-                let parts: Vec<u32> = s
-                    .trim_matches(|c| c == '"' || c == '[' || c == ']')
-                    .split(',')
-                    .filter_map(|p| p.trim().parse().ok())
-                    .collect();
-                (parts.len() == 2).then_some((parts[0], parts[1]))
-            })
-            .unwrap_or((1280, 800));
-        let seq0 = self.screencast_seq.load(Ordering::SeqCst);
-        *self.screencast_frame.lock().await = None;
-        if self
-            .conn
-            .request_session(
-                "Page.startScreencast",
-                serde_json::json!({ "width": w, "height": h, "quality": 95 }),
-                Some(sid),
-            )
-            .await
-            .is_err()
-        {
-            return None;
-        }
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(3000);
-        let mut frame = None;
-        while tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            if self.screencast_seq.load(Ordering::SeqCst) > seq0 {
-                frame = self.screencast_frame.lock().await.clone();
-                break;
-            }
-        }
-        let _ = self
-            .conn
-            .request_session("Page.stopScreencast", serde_json::json!({}), Some(sid))
-            .await;
-        let b64 = frame?;
-        base64::engine::general_purpose::STANDARD.decode(b64).ok()
     }
 
     async fn evaluate(&self, expression: &str) -> Result<serde_json::Value> {

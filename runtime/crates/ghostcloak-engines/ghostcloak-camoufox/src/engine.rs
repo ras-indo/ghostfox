@@ -3554,9 +3554,7 @@ impl PageHandle for CamoufoxPage {
             .request_session("Page.stopScreencast", serde_json::json!({}), Some(sid))
             .await;
         let b64 = frame?;
-        base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .ok()
+        base64::engine::general_purpose::STANDARD.decode(b64).ok()
     }
 
     async fn evaluate(&self, expression: &str) -> Result<serde_json::Value> {

@@ -1527,7 +1527,7 @@ const BROWSEREXEC_JS: &str = r#"(()=>{
 #[tool_router]
 impl GhostcloakServer {
     #[tool(
-        description = "Create a new browsing session: launches the engine with a fresh coherent identity. Returns session_id. NOTE: each call generates a NEW random identity (label, platform, fingerprint) — pass the same profile_dir to reuse one persistent profile/identity across sessions. Sessions die when the server restarts; always pair with session_close when done.",
+        description = "Create a new browsing session: launches the engine with a fresh coherent identity. Returns session_id. NOTE: each call generates a NEW random identity (label, platform, fingerprint) — pass the same profile_dir to reuse one persistent profile/identity across sessions. Sessions die when the server restarts; always pair with session_close when done."
     )]
     async fn session_create(
         &self,
@@ -1756,11 +1756,10 @@ impl GhostcloakServer {
                 // success. about:/data: targets are exempt (they land
                 // instantly on a document named about:...).
                 let target_l = url.trim().to_ascii_lowercase();
-                let target_is_named = target_l.starts_with("about:")
-                    || target_l.starts_with("data:");
+                let target_is_named =
+                    target_l.starts_with("about:") || target_l.starts_with("data:");
                 if !target_is_named {
-                    let deadline = tokio::time::Instant::now()
-                        + std::time::Duration::from_secs(10);
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
                     loop {
                         let settled = settled_url(&page).await;
                         if !settled.is_empty() && !settled.starts_with("about:") {

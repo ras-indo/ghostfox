@@ -99,7 +99,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diff, and implausible drags (> bg width) refuse to drag rather than
   mis-slide.
 
+### Removed
+
+- **Captcha solver tools removed from the gateway** (7 tools): `captcha_solve`,
+  `page_captcha_ocr`, `page_geetest_click`, `page_geetest_slide`,
+  `page_captcha_rotate`, `page_hcaptcha`, `page_vision`. With them went the
+  on-device model stack entirely: the `ort` + `rten` ONNX runtimes, the
+  `ddddocr` / `geetest` / `captcha` / `ocr` modules and the YOLO/CRNN model
+  files — the gateway no longer runs any local ML inference ("no YOLO or
+  anything else in here"). Generic capability stays: `page_screenshot`,
+  `page_ocr` (returns the PNG for the caller's own vision), `page_pixels`,
+  `page_match_image`, `page_contrast`, `page_drag` (`.geetest_btn` still
+  works as a plain drag target). Tool count 76 → 69 (contract test updated).
+
 ### Fixed
+
+- **Font tofu (CJK/emoji/Arabic rendered as .notdef boxes)** — two stacked
+  causes: (1) `FONTCONFIG_PATH` pointed at `<home>/fontconfig/<platform>`,
+  a directory NOTHING ever created, so fontconfig silently fell back to the
+  host font set (DejaVu-only boxes on minimal hosts); the engine now
+  self-heals by writing `fonts.conf` on first session, wiring the bundled
+  `fonts/<platform>` set (Noto CJK/SC/TC/JP/KR, Twemoji, Naskh Arabic…)
+  into the search path. (2) `LINUX_FONTS` (the fingerprint font allowlist
+  the engine checks every lookup against) carried no script families, so
+  even resolvable CJK/emoji lookups were blocked → .notdef; the allowlist
+  now includes the bundled Noto CJK/Arabic/Hebrew/Thai/Devanagari and
+  Twemoji families. Verified by render test: Arabic/CJK/emoji previously
+  tofu.
 
 - **`page_drag` from_ref/to_ref accept a CSS selector** — `rect_ref_js`
   only resolved registered a11y refs, but page_a11y registers INTERACTIVE

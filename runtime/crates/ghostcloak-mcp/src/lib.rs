@@ -8,11 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod http;
 
-mod captcha;
-mod ddddocr;
-mod geetest;
 mod liveview;
-mod ocr;
 pub mod recording;
 pub mod server;
 

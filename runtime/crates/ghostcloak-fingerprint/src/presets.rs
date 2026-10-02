@@ -179,6 +179,22 @@ pub const LINUX_FONTS: &[&str] = &[
     "Cousine",
     "Tinos",
     "Arimo",
+    // Script coverage the bundled Linux font set actually ships
+    // (fonts/linux/*.otf|ttf). Without these families on the allowlist the
+    // engine blocks every CJK/emoji/Arabic lookup after substitution and
+    // content renders as .notdef tofu boxes — see fonts.conf + FONTCONFIG_PATH.
+    "Noto Sans SC",
+    "Noto Sans TC",
+    "Noto Sans JP",
+    "Noto Sans KR",
+    "Noto Sans Arabic",
+    "Noto Naskh Arabic",
+    "Noto Sans Devanagari",
+    "Noto Sans Thai",
+    "Noto Sans Hebrew",
+    "Noto Sans Symbols",
+    "Noto Sans Symbols 2",
+    "Twemoji Mozilla",
 ];
 
 pub const ANDROID_FONTS: &[&str] = &[

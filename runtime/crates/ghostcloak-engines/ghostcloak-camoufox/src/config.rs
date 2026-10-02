@@ -249,6 +249,35 @@ pub fn env_for_identity(
         Platform::Linux | Platform::Android => "linux",
     };
     let fc = camoufox_home.join("fontconfig").join(ua_os);
+    // FONTCONFIG_PATH must exist: pointing it at a missing directory makes
+    // fontconfig silently fall back to the HOST font set — minimal hosts
+    // (DejaVu only) render every CJK/emoji/Arabic glyph as .notdef tofu.
+    // Generate the config from the bundled <home>/fonts/<platform> set the
+    // first time a session needs it (self-healing setup).
+    if std::fs::create_dir_all(&fc).is_ok() {
+        let conf = fc.join("fonts.conf");
+        if !conf.exists() {
+            let fonts_dir = camoufox_home.join("fonts").join(ua_os);
+            let conf_xml = format!(
+                r#"<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <dir>{fonts}</dir>
+  <dir>{home_fonts}</dir>
+  <dir>/usr/share/fonts</dir>
+  <dir>/usr/local/share/fonts</dir>
+  <dir prefix="cwd">fonts</dir>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <cachedir>{cache}</cachedir>
+</fontconfig>
+"#,
+                fonts = fonts_dir.display(),
+                home_fonts = camoufox_home.join("fonts").display(),
+                cache = fc.join("cache").display(),
+            );
+            let _ = std::fs::write(&conf, conf_xml);
+        }
+    }
     env.insert(
         "FONTCONFIG_PATH".to_string(),
         fc.to_string_lossy().to_string(),

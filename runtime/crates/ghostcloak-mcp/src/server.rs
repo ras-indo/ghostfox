@@ -1230,6 +1230,7 @@ const SEMANTIC_JS: &str = r#"(() => {
   };
   let seq = 0;
   const stop = { n: false };
+  const idByEl = new Map(); // element -> emitted node id (for 'inside' edges)
 
   function geom(el) {
     let r;
@@ -1436,8 +1437,15 @@ const SEMANTIC_JS: &str = r#"(() => {
         confidence: explicitRole || role ? 1.0 : 0.9
       };
       out.ui_nodes.push(node);
-      if (parentId) {
-        out.relationships.push({ source: id, relation: "inside", target: parentId });
+      idByEl.set(el, id);
+      let anc = el.parentElement;
+      while (anc && !idByEl.has(anc)) {
+        const root = anc.getRootNode ? anc.getRootNode() : null;
+        anc = anc.parentElement || (root && root.host ? root.host : null);
+      }
+      const target = (anc && idByEl.get(anc)) || parentId;
+      if (target) {
+        out.relationships.push({ source: id, relation: "inside", target: target });
       }
 
       // form grouping

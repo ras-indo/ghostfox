@@ -311,8 +311,6 @@ struct PageScreenshotParams {
     jpeg_quality: Option<u8>,
 }
 
-}
-
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PageOpenParams {
     session_id: String,

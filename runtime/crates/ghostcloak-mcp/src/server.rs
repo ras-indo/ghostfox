@@ -1356,13 +1356,14 @@ const SEMANTIC_JS: &str = r#"(() => {
     if (stop.n) return;
     const els = [];
     try {
-      const w = document.createTreeWalker(root instanceof Document ? root.documentElement : root, NodeFilter.SHOW_ELEMENT);
-      let cur = w.currentNode;
+      const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      let cur = w.nextNode(); // skip the root itself (Document/ShadowRoot fragment)
       while (cur) { els.push(cur); cur = w.nextNode(); if (els.length > 2500) break; }
     } catch (e) { return; }
 
     for (const el of els) {
       if (stop.n) return;
+      try {
       // recurse open shadow roots
       if (el.shadowRoot) {
         const hostId = el.getAttribute("data-testid") || el.tagName.toLowerCase();
@@ -1472,7 +1473,8 @@ const SEMANTIC_JS: &str = r#"(() => {
         } catch (e) {}
         const rows = [];
         try {
-          const trs = el.querySelectorAll("tbody tr, tr");
+          let trs = el.querySelectorAll("tbody tr");
+          if (!trs.length) trs = Array.from(el.querySelectorAll("tr")).filter(tr => !tr.closest("thead"));
           let ri = 0;
           for (const tr of trs) {
             if (ri >= 100) break;
@@ -1495,6 +1497,7 @@ const SEMANTIC_JS: &str = r#"(() => {
           confidence: 1.0
         });
       }
+      } catch (e) { /* isolate: one broken node must not kill the walk */ }
     }
   }
 

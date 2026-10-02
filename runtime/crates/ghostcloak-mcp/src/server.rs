@@ -1216,6 +1216,148 @@ struct SemanticParams {
     max_nodes: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SemanticQueryParams {
+    session_id: String,
+    page_id: String,
+    /// Free-form find clause, e.g. 'surface: iframe, role: button, name: contains "Pay"'.
+    /// Fields: surface, context, role, name, text, type/tag, id, action, visible, enabled.
+    find: Option<String>,
+    surface: Option<String>,
+    context: Option<String>,
+    role: Option<String>,
+    name_contains: Option<String>,
+    text_contains: Option<String>,
+    id_contains: Option<String>,
+    action: Option<String>,
+    visible: Option<bool>,
+    enabled: Option<bool>,
+    /// Max matched nodes to return (default 20).
+    limit: Option<u32>,
+    max_nodes: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ActionGroundParams {
+    session_id: String,
+    page_id: String,
+    /// Action to ground: click|dblclick|rightclick|type|fill|select|check|drag|submit|scroll
+    action: String,
+    /// Target: node name, name fragment, id fragment, role, or a find-clause style word.
+    target: String,
+    /// Restrict candidates to a surface: web|shadow_dom|iframe
+    surface: Option<String>,
+    max_nodes: Option<u32>,
+}
+
+/// Extract the first text payload from a tool result (page_semantic returns JSON text).
+fn result_text(r: &CallToolResult) -> String {
+    for c in &r.content {
+        if let rmcp::model::Content::Text(t) = c {
+            return t.text.clone();
+        }
+    }
+    String::new()
+}
+
+/// Split a find string on commas that sit OUTSIDE double quotes.
+fn split_clauses(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    for ch in s.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            cur.push(ch);
+        } else if ch == ',' && !in_quotes {
+            let t = cur.trim().to_string();
+            if !t.is_empty() {
+                out.push(t);
+            }
+            cur.clear();
+        } else {
+            cur.push(ch);
+        }
+    }
+    let t = cur.trim().to_string();
+    if !t.is_empty() {
+        out.push(t);
+    }
+    out
+}
+
+/// Parse one clause `field[: [contains] value]` -> (field, op, value) lowercased.
+fn parse_find_clause(c: &str) -> Option<(String, String, String)> {
+    let idx = c.find(':')?;
+    let field = c[..idx].trim().to_lowercase();
+    let mut rest = c[idx + 1..].trim();
+    let mut op = "eq".to_string();
+    if let Some(r2) = rest.strip_prefix("contains") {
+        op = "contains".to_string();
+        rest = r2.trim();
+    }
+    let value = rest.trim().trim_matches('"').trim().to_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    Some((field, op, value))
+}
+
+fn str_field<'a>(n: &'a serde_json::Value, path: &[&str]) -> &'a str {
+    let mut cur = n;
+    for p in path {
+        match cur.get(*p) {
+            Some(v) => cur = v,
+            None => return "",
+        }
+    }
+    cur.as_str().unwrap_or("")
+}
+
+fn text_haystack(n: &serde_json::Value) -> String {
+    format!(
+        "{} {} {}",
+        str_field(n, &["semantic", "name"]),
+        str_field(n, &["semantic", "text"]),
+        str_field(n, &["dom", "attributes", "value"])
+    )
+    .to_lowercase()
+}
+
+fn scalar_match(actual: &str, op: &str, val: &str) -> bool {
+    let a = actual.to_lowercase();
+    if op == "contains" {
+        a.contains(val)
+    } else {
+        a == val
+    }
+}
+
+/// Does ui_node `n` satisfy one (field, op, value) clause?
+fn node_matches(n: &serde_json::Value, field: &str, op: &str, val: &str) -> bool {
+    match field {
+        "surface" => scalar_match(str_field(n, &["surface"]), op, val),
+        "context" => scalar_match(str_field(n, &["context"]), op, val),
+        "role" => scalar_match(str_field(n, &["semantic", "role"]), op, val),
+        "name" => scalar_match(str_field(n, &["semantic", "name"]), op, val),
+        "text" => scalar_match(&text_haystack(n), op, val),
+        "type" | "tag" => scalar_match(str_field(n, &["dom", "tag"]), op, val),
+        "id" => scalar_match(str_field(n, &["id"]), op, val),
+        "action" => n["actions"]
+            .as_array()
+            .map(|acts| {
+                acts.iter()
+                    .any(|a| a["type"].as_str().unwrap_or("") == val)
+            })
+            .unwrap_or(false),
+        "visible" | "enabled" | "disabled" | "checked" | "selected" | "expanded" | "pressed" => {
+            let want = val == "true" || val == "1";
+            n["state"][field].as_bool().unwrap_or(false) == want
+        }
+        _ => false,
+    }
+}
+
 const SEMANTIC_JS: &str = r#"(() => {
   const MAX = @@MAX@@;
   const out = {
@@ -1231,6 +1373,29 @@ const SEMANTIC_JS: &str = r#"(() => {
   let seq = 0;
   const stop = { n: false };
   const idByEl = new Map(); // element -> emitted node id (for 'inside' edges)
+  function nthPath(el) {
+    const parts = [];
+    let cur = el;
+    while (cur && cur.nodeType === 1 && cur !== document.documentElement) {
+      const parent = cur.parentElement;
+      if (!parent) break;
+      const tag = cur.tagName.toLowerCase();
+      const sibs = Array.from(parent.children).filter(c => c.tagName === cur.tagName);
+      parts.unshift(tag + (sibs.length > 1 ? ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")" : ""));
+      cur = parent;
+    }
+    return parts.length ? parts.join(">") : "";
+  }
+  function cssSelector(el, id, alabel) {
+    if (id) return '#' + id;
+    if (alabel) {
+      const esc = alabel.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      const tagged = el.tagName.toLowerCase() + '[aria-label="' + esc + '"]';
+      if (document.querySelectorAll(tagged).length === 1) return tagged;
+      return '[aria-label="' + esc + '"]';
+    }
+    return nthPath(el);
+  }
 
   function geom(el) {
     let r;
@@ -1408,6 +1573,7 @@ const SEMANTIC_JS: &str = r#"(() => {
       const tag = el.tagName.toLowerCase();
       const disabled = el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true";
       const id = nextId(ctx, el);
+      const _sel = cssSelector(el, el.id || null, (el.getAttribute("aria-label") || "").trim() || null);
       const ev = [{ source: "dom", value: tag + (el.id ? '#' + el.id : "") }];
       ev.push({ source: "accessibility", value: "role=" + (role || "generic") + (name ? ",name=" + name.slice(0, 60) : "") });
       out.provenance_summary.observed += 1;
@@ -1415,7 +1581,7 @@ const SEMANTIC_JS: &str = r#"(() => {
 
       const node = {
         id: id, surface: surface, context: ctx,
-        dom: { tag: tag, attributes: attrsOf(el) },
+        dom: { tag: tag, attributes: attrsOf(el), path: nthPath(el), selector: _sel },
         semantic: {
           role: role || "generic", name: name,
           text: ["BUTTON", "A", "LABEL", "LEGEND", "TH", "TD", "LI", "OPTION"].indexOf(el.tagName) >= 0
@@ -4252,6 +4418,327 @@ impl GhostcloakServer {
             serde_json::json!({ "max_nodes": max_nodes.unwrap_or(400) }),
         );
         Ok(r)
+    }
+
+    #[tool(
+        description = "SEMANTIC QUERY — search the semantic world model (page_semantic snapshot) by \
+        structured filters instead of raw text: find {surface, context, role, name, text, id, action, \
+        state} via a find clause ('surface: iframe, role: button, name: contains \"Pay\"') or explicit \
+        fields. Matching runs over the DOM/ARIA-observed snapshot; filtering is reported as INFERENCE \
+        (observations carry observed vs inferred provenance). Returns match_count, matched ui_nodes \
+        (limit, default 20), and the applied filter trace. Use this to locate semantic targets before \
+        page_action_ground."
+    )]
+    async fn page_semantic_query(
+        &self,
+        Parameters(SemanticQueryParams {
+            session_id,
+            page_id,
+            find,
+            surface,
+            context,
+            role,
+            name_contains,
+            text_contains,
+            id_contains,
+            action,
+            visible,
+            enabled,
+            limit,
+            max_nodes,
+        }): Parameters<SemanticQueryParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let sem = self
+            .page_semantic(Parameters(SemanticParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                max_nodes,
+            }))
+            .await?;
+        let raw = result_text(&sem);
+        let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            rmcp::model::ErrorData::internal_error(format!("semantic snapshot parse: {e}"), None)
+        })?;
+
+        let mut clauses: Vec<(String, String, String)> = Vec::new();
+        if let Some(f) = &find {
+            for c in split_clauses(f) {
+                if let Some(t) = parse_find_clause(&c) {
+                    clauses.push(t);
+                }
+            }
+        }
+        if let Some(x) = &surface {
+            clauses.push(("surface".into(), "eq".into(), x.to_lowercase()));
+        }
+        if let Some(x) = &context {
+            clauses.push(("context".into(), "eq".into(), x.to_lowercase()));
+        }
+        if let Some(x) = &role {
+            clauses.push(("role".into(), "eq".into(), x.to_lowercase()));
+        }
+        if let Some(x) = &name_contains {
+            clauses.push(("name".into(), "contains".into(), x.to_lowercase()));
+        }
+        if let Some(x) = &text_contains {
+            clauses.push(("text".into(), "contains".into(), x.to_lowercase()));
+        }
+        if let Some(x) = &id_contains {
+            clauses.push(("id".into(), "contains".into(), x.to_lowercase()));
+        }
+        if let Some(x) = &action {
+            clauses.push(("action".into(), "eq".into(), x.to_lowercase()));
+        }
+        if let Some(x) = visible {
+            clauses.push(("visible".into(), "eq".into(), x.to_string()));
+        }
+        if let Some(x) = enabled {
+            clauses.push(("enabled".into(), "eq".into(), x.to_string()));
+        }
+
+        let limit_n = limit.unwrap_or(20) as usize;
+        let mut matched: Vec<serde_json::Value> = Vec::new();
+        let mut total = 0usize;
+        let mut snapshot_n = 0usize;
+        if let Some(nodes) = v["ui_nodes"].as_array() {
+            snapshot_n = nodes.len();
+            for n in nodes {
+                if clauses
+                    .iter()
+                    .all(|(f, o, val)| node_matches(n, f, o, val))
+                {
+                    total += 1;
+                    if matched.len() < limit_n {
+                        matched.push(n.clone());
+                    }
+                }
+            }
+        }
+
+        let filter_trace: Vec<String> = clauses
+            .iter()
+            .map(|(f, o, val)| format!("{f} {o} {val}"))
+            .collect();
+        let out = serde_json::json!({
+            "query": { "find": find, "filters": filter_trace },
+            "match_count": total,
+            "returned": matched.len(),
+            "truncated": total > matched.len(),
+            "nodes": matched,
+            "observations": [
+                {"source": "observed", "value": format!("page_semantic snapshot: {snapshot_n} nodes walked from DOM/ARIA")},
+                {"source": "inferred", "value": "filter match = inference over the snapshot, not a live DOM assertion"}
+            ],
+            "provenance": "observed snapshot + inferred filtering"
+        });
+        let _ = self.recorder.record(
+            &session_id,
+            "page_semantic_query",
+            Some(&page_id),
+            serde_json::json!({ "filters": clauses.len(), "matches": total }),
+        );
+        Ok(text_result(out.to_string()))
+    }
+
+    #[tool(
+        description = "ACTION GROUNDING — turn an intent ('click Submit Order') into an executable \
+        target. Pipeline: semantic target resolution (name/role/text/id similarity scoring over the \
+        page_semantic snapshot) -> grounding priority selector (#id, unique [aria-label=...], or \
+        nth-path fallback) -> suggested tool call (page_click / page_type / page_dropdown ...). Returns \
+        target node, grounding {method, selector, center, confidence}, suggested {tool, params}, top \
+        candidates for review, fallback chain (a11y ref > selector > re-query after mutation), and \
+        observations separating observed geometry from inferred target selection. Does NOT execute — \
+        you choose when to run the suggested call. Requires a specific target (a form is too broad: \
+        ground the field or the submit control)."
+    )]
+    async fn page_action_ground(
+        &self,
+        Parameters(ActionGroundParams {
+            session_id,
+            page_id,
+            action,
+            target,
+            surface,
+            max_nodes,
+        }): Parameters<ActionGroundParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let act = action.trim().to_lowercase();
+        let sem = self
+            .page_semantic(Parameters(SemanticParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                max_nodes,
+            }))
+            .await?;
+        let raw = result_text(&sem);
+        let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            rmcp::model::ErrorData::internal_error(format!("semantic snapshot parse: {e}"), None)
+        })?;
+
+        let t = target.trim().to_lowercase();
+        if t.is_empty() {
+            return Err(rmcp::model::ErrorData::invalid_params(
+                "target must be a specific name/role/id fragment",
+                None,
+            ));
+        }
+        let mut scored: Vec<(f64, serde_json::Value)> = Vec::new();
+        if let Some(nodes) = v["ui_nodes"].as_array() {
+            for n in nodes {
+                if let Some(sf) = &surface {
+                    if str_field(n, &["surface"]) != sf.as_str() {
+                        continue;
+                    }
+                }
+                let name = str_field(n, &["semantic", "name"]).to_lowercase();
+                let text = str_field(n, &["semantic", "text"]).to_lowercase();
+                let id = str_field(n, &["id"]).to_lowercase();
+                let role = str_field(n, &["semantic", "role"]).to_lowercase();
+                let mut s = 0.0f64;
+                if !name.is_empty() && name == t {
+                    s += 0.55;
+                } else if !name.is_empty() && name.contains(&t) {
+                    s += 0.4;
+                }
+                if !text.is_empty() && text.contains(&t) {
+                    s += 0.2;
+                }
+                if id.contains(&t) {
+                    s += 0.25;
+                }
+                if role == t {
+                    s += 0.2;
+                }
+                if let Some(acts) = n["actions"].as_array() {
+                    if acts
+                        .iter()
+                        .any(|a| a["type"].as_str().unwrap_or("") == act)
+                    {
+                        s += 0.15;
+                    }
+                }
+                if n["state"]["visible"].as_bool().unwrap_or(false) {
+                    s += 0.05;
+                }
+                if n["state"]["enabled"].as_bool().unwrap_or(false) {
+                    s += 0.05;
+                }
+                if s > 0.0 {
+                    scored.push((s, n.clone()));
+                }
+            }
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let (best_score, best) = match scored.first() {
+            Some(x) => x.clone(),
+            None => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!("no semantic node matches target '{target}'"),
+                    None,
+                ))
+            }
+        };
+
+        let selector = str_field(&best, &["dom", "selector"]).to_string();
+        let center = best["geometry"]["center"].clone();
+        let confidence = if best_score >= 0.8 {
+            0.95
+        } else if best_score >= 0.6 {
+            0.85
+        } else {
+            0.7
+        };
+
+        let suggested = match act.as_str() {
+            "dblclick" | "doubleclick" => serde_json::json!({
+                "tool": "page_click",
+                "params": { "session_id": session_id, "page_id": page_id, "selector": selector, "click_count": 2 }
+            }),
+            "rightclick" => serde_json::json!({
+                "tool": "page_click",
+                "params": { "session_id": session_id, "page_id": page_id, "selector": selector, "button": "right" }
+            }),
+            "type" | "fill" | "write" => serde_json::json!({
+                "tool": "page_type",
+                "params": { "session_id": session_id, "page_id": page_id, "selector": selector, "text": "<fill with intended text>" }
+            }),
+            "select" | "choose" => serde_json::json!({
+                "tool": "page_dropdown",
+                "params": { "session_id": session_id, "page_id": page_id, "selector": selector, "action": "select", "text": "<option label>" }
+            }),
+            "drag" => serde_json::json!({
+                "tool": "page_drag",
+                "params": { "session_id": session_id, "page_id": page_id, "from_ref": selector, "to_ref": "<destination selector>" },
+                "note": "drag needs a destination — ground it separately"
+            }),
+            "scroll" => serde_json::json!({
+                "tool": "page_scroll",
+                "params": { "session_id": session_id, "page_id": page_id, "selector": selector },
+                "note": "verify page_scroll params before use"
+            }),
+            _ => serde_json::json!({
+                "tool": "page_click",
+                "params": { "session_id": session_id, "page_id": page_id, "selector": selector }
+            }),
+        };
+
+        let candidates: Vec<serde_json::Value> = scored
+            .iter()
+            .take(3)
+            .map(|(s, n)| {
+                serde_json::json!({
+                    "id": str_field(n, &["id"]),
+                    "name": str_field(n, &["semantic", "name"]),
+                    "surface": str_field(n, &["surface"]),
+                    "score": (*s * 100.0).round() / 100.0
+                })
+            })
+            .collect();
+
+        let out = serde_json::json!({
+            "action": act,
+            "requested_target": target,
+            "target": {
+                "id": str_field(&best, &["id"]),
+                "surface": str_field(&best, &["surface"]),
+                "context": str_field(&best, &["context"]),
+                "role": str_field(&best, &["semantic", "role"]),
+                "name": str_field(&best, &["semantic", "name"]),
+                "selector": selector,
+                "center": center
+            },
+            "grounding": {
+                "method": "dom_selector",
+                "selector": selector,
+                "priority_note": "selector grounding from live DOM snapshot; for scroll-into-view reliability fall back to page_a11y ref + page_click_ref",
+                "confidence": confidence
+            },
+            "suggested": suggested,
+            "candidates": candidates,
+            "fallback_chain": [
+                "page_a11y ref + page_click_ref (scrolls into view; best on web-component UIs)",
+                "grounded selector via page_click / page_type / page_dropdown",
+                "if miss or STALE-REF: re-run page_semantic after the DOM mutates, ground again"
+            ],
+            "reasoning": format!(
+                "rule: name/role/text/id similarity vs '{target}'; scored_matches={}; selected={} score={:.2}",
+                scored.len(),
+                str_field(&best, &["id"]),
+                best_score
+            ),
+            "observations": [
+                {"source": "observed", "value": "target geometry & selector from live DOM/ARIA snapshot"},
+                {"source": "inferred", "value": "target selection is similarity scoring — confirm the name matches your intent before executing"}
+            ],
+            "provenance": "observed snapshot + inferred selection/grounding"
+        });
+        let _ = self.recorder.record(
+            &session_id,
+            "page_action_ground",
+            Some(&page_id),
+            serde_json::json!({ "action": act, "target": target, "score": best_score }),
+        );
+        Ok(text_result(out.to_string()))
     }
 
     #[tool(

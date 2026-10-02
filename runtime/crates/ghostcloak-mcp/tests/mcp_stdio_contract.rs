@@ -139,6 +139,8 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
         "page_search",
         "page_query",
         "page_semantic",
+        "page_semantic_query",
+        "page_action_ground",
         "page_dropdown",
         "page_scroll_to_text",
         "page_fill_form",

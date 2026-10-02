@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`page_semantic_query` + `page_action_ground` — query engine & action grounding** for the semantic world model. `page_semantic_query` filters the `page_semantic` snapshot by structured fields or a find clause (`surface: iframe, role: button, name: contains "Pay"`) and returns matched nodes plus an applied-filter trace — matching is reported as *inference* over the *observed* snapshot in `observations[]`. `page_action_ground` resolves an intent (`click Submit Order`) to a semantic target by name/role/text/id similarity scoring, grounds it via dom.selector priority (`#id` → unique `[aria-label=...]` → nth-path), and returns the target node, grounding `{method, selector, center, confidence}`, a copy-pasteable suggested tool call (`page_click`/`page_type`/`page_dropdown`/…), top-3 candidates, and the fallback chain (a11y ref → selector → re-query after mutation) — it never executes, the agent decides. `page_semantic` nodes now carry `dom.path` (nth-of-type chain) and `dom.selector` for grounding.
 - **`page_semantic` — Semantic Browser Model snapshot (spec: context →
   surface → ui_node → entity → relationship → action)** — the page as a
   STRUCTURED WORLD MODEL instead of raw HTML/coordinates. Walks the DOM +

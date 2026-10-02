@@ -4641,10 +4641,16 @@ impl GhostcloakServer {
                 expression: SCENE_JS.to_string(),
             }))
             .await?;
-        v["scenes"] = match serde_json::from_str::<serde_json::Value>(&result_text(&rs)) {
-            Ok(sv) => sv["scenes"].clone(),
-            Err(_) => serde_json::json!([]),
-        };
+        match serde_json::from_str::<serde_json::Value>(&result_text(&rs)) {
+            Ok(sv) => {
+                v["scenes"] = sv["scenes"].clone();
+                v["scene_summary"] = sv["summary"].clone();
+            }
+            Err(_) => {
+                v["scenes"] = serde_json::json!([]);
+                v["scene_summary"] = serde_json::json!({});
+            }
+        }
         let _ = self.recorder.record(
             &session_id,
             "page_semantic",

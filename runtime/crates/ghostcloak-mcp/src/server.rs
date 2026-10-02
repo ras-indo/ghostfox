@@ -1699,6 +1699,11 @@ const SEMANTIC_JS: &str = r#"(() => {
   function nextId(prefix, el) {
     seq++;
     if (el.id) return prefix + ".id." + el.id;
+    // Path-stable fallback: structural identity (nth-of-type chain), NOT walk
+    // order — inserting/removing a sibling elsewhere can no longer renumber
+    // every later node (keeps page_semantic_diff free of phantom add/remove).
+    const p = nthPath(el);
+    if (p) return prefix + ".node." + p.replace(/:nth-of-type\((\d+)\)/g, "$1");
     return prefix + ".node." + String(seq).padStart(3, "0");
   }
 

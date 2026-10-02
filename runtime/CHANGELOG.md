@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Semantic node ids are now path-stable**: unnamed nodes use their nth-of-type
+  structural chain (e.g. `page.main.node.div2>input1`) instead of walk-order sequence
+  numbers — inserting or removing a sibling no longer renumbers every later node,
+  so `page_semantic_diff` reports the real transition instead of phantom add/remove.
 - **`page_semantic_diff` — state-transition observer** (the observe → update-world-model step of the action loop). `page_semantic` now arms a per-page baseline; the diff tool compares a fresh snapshot against it and returns only what moved: `transitions[]` (added/removed/changed with per-field `{from, to}` — state flags, semantic text/name, input values, >2px geometry), `visual_changed[]` (canvas pixel-payload deltas, scene visibility/kind), and page url/title changes. Causal timing is labeled as **inference** in `observations[]` (temporal adjacency, not proof). `update_baseline` (default true) advances the baseline so consecutive diffs step through an interaction. Snapshot logic moved to a shared `take_semantic` pipeline.
 
 - **Scene extraction in `page_semantic` (SVG + canvas, spec §11-15)** — a second async pass collects `scenes[]` next to `ui_nodes[]`, each with the common entity interface (`id, surface, type, kind, name, state, geometry, relationships, evidence, confidence`). SVG scenes are read as a **structure graph**: `<title>/<desc>`/`<text>` labels, axis/legend detection, series groups, markers, shape counts — observed evidence, `kind` (chart/diagram/plot/map) *inferred* with explicit confidence (0.5-0.85). Canvas scenes cannot expose DOM structure, so they are read as **pixels without model inference**: a non-mutating `toDataURL` probe (blank detection by payload size) then a temp-canvas 48×48 decode for luminance mean/std + dominant-color shares; kind comes only from aria keywords (chart/map/game), otherwise honestly `unknown`. Tainted canvases are reported as blocked, not guessed. The scene pass is a separate `page_eval` so an `await` can never stall the synchronous node walk.

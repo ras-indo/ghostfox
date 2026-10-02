@@ -101,6 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`page_drag` from_ref/to_ref accept a CSS selector** — `rect_ref_js`
+  only resolved registered a11y refs, but page_a11y registers INTERACTIVE
+  elements only, so plain container divs like GeeTest's slider handle
+  (`.geetest_btn`) could never be dragged (`STALE-REF`). Added the same
+  CSS-selector fallback `pixels_ref_js` already uses: map lookup first,
+  then `document.querySelector`.
+
 - **`page_geetest_slide` ambiguity check uses a cluster-aware peak zone
   (PEAK_ZONE 8 → 16)** — the runner-up scan excluded only ±8px around the
   winning match, but slide puzzles correlate *horizontally*: the hole's

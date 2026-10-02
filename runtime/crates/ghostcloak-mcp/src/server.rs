@@ -2084,7 +2084,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Drag with a HUMAN-LIKE movement profile: approaches the source, presses, drags along a bezier arc with ease-in-out velocity and micro-pauses, settles, releases. Pass from_ref + to_ref to drag element onto element, or from_ref + offset_x/offset_y to drag by pixels (slider captchas, resize handles). All from page_a11y refs."
+        description = "Drag with a HUMAN-LIKE movement profile: approaches the source, presses, drags along a bezier arc with ease-in-out velocity and micro-pauses, settles, releases. Pass from_ref + to_ref to drag element onto element, or from_ref + offset_x/offset_y to drag by pixels (slider captchas, resize handles). from_ref/to_ref accept a page_a11y ref OR a CSS selector (e.g. '.geetest_btn') for elements a11y doesn't register."
     )]
     async fn page_drag(
         &self,

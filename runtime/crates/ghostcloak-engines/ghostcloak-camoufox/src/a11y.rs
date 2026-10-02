@@ -413,6 +413,13 @@ pub(crate) fn rect_ref_js(r: &str) -> String {
     format!(
         r#"(function() {{
   var el = (window.__gfxRefs || new Map()).get({r});
+  // Fallback: treat the ref as a CSS selector. page_a11y only registers
+  // INTERACTIVE elements, so plain container divs (slider handles, resize
+  // grips) never got a ref — passing '.geetest_btn' used to hard-fail as
+  // STALE-REF. Same fallback pixels_ref_js already uses.
+  if (!el || !el.isConnected) {{
+    try {{ el = document.querySelector({r}); }} catch (e) {{ el = null; }}
+  }}
   if (!el || !el.isConnected) return 'STALE-REF';
   el.scrollIntoView({{block: 'center'}});
   var rect = el.getBoundingClientRect();

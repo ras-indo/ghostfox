@@ -103,7 +103,7 @@ struct InitScriptParams {
 struct NetParams {
     session_id: String,
     page_id: String,
-    /// Optional URL substring filter (e.g. "geetest").
+    /// Optional URL substring filter (e.g. "api.").
     filter: Option<String>,
     /// Clear the capture buffer after reading (default false). The buffer
     /// caps at 1000 entries — clear it between scenarios so old traffic
@@ -311,18 +311,6 @@ struct PageScreenshotParams {
     jpeg_quality: Option<u8>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-struct CaptchaSolveParams {
-    session_id: String,
-    /// Turnstile/hcaptcha-style: the site's sitekey.
-    #[serde(default)]
-    sitekey: Option<String>,
-    /// Turnstile/hcaptcha-style: the page URL the challenge lives on.
-    #[serde(default)]
-    pageurl: Option<String>,
-    /// Image captcha: the challenge image as base64 PNG.
-    #[serde(default)]
-    image_base64: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2909,7 +2897,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "Drag with a HUMAN-LIKE movement profile: approaches the source, presses, drags along a bezier arc with ease-in-out velocity and micro-pauses, settles, releases. Pass from_ref + to_ref to drag element onto element, or from_ref + offset_x/offset_y to drag by pixels (slider captchas, resize handles). from_ref/to_ref accept a page_a11y ref OR a CSS selector (e.g. '.geetest_btn') for elements a11y doesn't register."
+        description = "Drag with a HUMAN-LIKE movement profile: approaches the source, presses, drags along a bezier arc with ease-in-out velocity and micro-pauses, settles, releases. Pass from_ref + to_ref to drag element onto element, or from_ref + offset_x/offset_y to drag by pixels (range sliders, resize handles). from_ref/to_ref accept a page_a11y ref OR a CSS selector (e.g. '.slider-knob') for elements a11y doesn't register."
     )]
     async fn page_drag(
         &self,
@@ -2954,7 +2942,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "SUPERMAN GLASSES: render an element (canvas / img / background-image) as a compact luminance GRID of digits 0-9 the agent READS directly — see shapes, holes, object orientation, image layout WITHOUT needing vision. 0=black, 9=white. Captcha gaps appear as darker cells, upright skies are bright rows on top. Pass the ref from page_a11y. Returns JSON {w, h, grid:[rows of digits]}."
+        description = "SUPERMAN GLASSES: render an element (canvas / img / background-image) as a compact luminance GRID of digits 0-9 the agent READS directly — see shapes, holes, object orientation, image layout WITHOUT needing vision. 0=black, 9=white. Dark holes show as darker cells, bright areas show as light rows on top. Pass the ref from page_a11y. Returns JSON {w, h, grid:[rows of digits]}."
     )]
     async fn page_pixels(
         &self,
@@ -3021,7 +3009,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "PROTOCOL-LEVEL NETWORK CAPTURE: start recording every HTTP response for this page, BELOW the page (invisible to page JS, unpatchable). The answer data of any captcha/API travels here. Start before triggering the flow you want to see."
+        description = "PROTOCOL-LEVEL NETWORK CAPTURE: start recording every HTTP response for this page, BELOW the page (invisible to page JS, unpatchable). Response payloads (API answer data) travel here. Start before triggering the flow you want to see."
     )]
     async fn page_network_start(
         &self,
@@ -3046,7 +3034,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "List captured HTTP responses [{url, requestId}] since capture start. Optionally filter by URL substring (e.g. 'geetest' or 'api.'). Pair with page_network_body to read the response content BY PROTOCOL."
+        description = "List captured HTTP responses [{url, requestId}] since capture start. Optionally filter by URL substring (e.g. 'api.' or 'login'). Pair with page_network_body to read the response content BY PROTOCOL."
     )]
     async fn page_network_read(
         &self,
@@ -3112,7 +3100,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "REAL TEMPLATE MATCHING: multi-scale normalized cross-correlation of a needle against a haystack, computed IN-PAGE at full grayscale resolution (no grid loss). Returns top matches [{x, y, score, scale}] — needle-center positions in haystack-image pixels. needle_rect optionally crops the needle (e.g. an instruction glyph band from the same image — GeeTest icon-click pattern). Images are cached per URL: single-use challenge URLs fetch exactly once. THE tool for: captcha piece->gap, glyph->character, logo->page."
+        description = "REAL TEMPLATE MATCHING: multi-scale normalized cross-correlation of a needle against a haystack, computed IN-PAGE at full grayscale resolution (no grid loss). Returns top matches [{x, y, score, scale}] — needle-center positions in haystack-image pixels. needle_rect optionally crops the needle (e.g. an instruction glyph band cropped from the same image). Images are cached per URL: single-use challenge URLs fetch exactly once. THE tool for: piece->gap matching, glyph->character, logo->page."
     )]
     async fn page_match_image(
         &self,
@@ -3157,7 +3145,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "HIGH-PASS VISION: local-contrast grid of an element's image (|gray - gaussian_blur|). Makes ANYTHING blended into a background VISIBLE — captcha characters on photos, watermarks, hidden strokes. 0 = flat area, 9 = strong edge. This is the native tool born from solving GeeTest icon-click with pure math. Works on canvas / img / background-image (one fetch per challenge)."
+        description = "HIGH-PASS VISION: local-contrast grid of an element's image (|gray - gaussian_blur|). Makes ANYTHING blended into a background VISIBLE — watermarks, characters over photos, hidden strokes. 0 = flat area, 9 = strong edge. This is the native tool born from pure-math local-contrast analysis. Works on canvas / img / background-image (one fetch per image URL)."
     )]
     async fn page_contrast(
         &self,
@@ -3575,7 +3563,7 @@ impl GhostcloakServer {
     }
 
     #[tool(
-        description = "SLEEP/DELAY: block for timeout_ms (1-60000), then return {waited_ms, url}. Use when a challenge widget needs render/paint time and page_wait_for_idle returns too early (e.g. captcha iframe still painting). Validates the session/page first — a dead session fails immediately instead of sleeping uselessly."
+        description = "SLEEP/DELAY: block for timeout_ms (1-60000), then return {waited_ms, url}. Use when a challenge widget needs render/paint time and page_wait_for_idle returns too early (e.g. a freshly loaded iframe still painting). Validates the session/page first — a dead session fails immediately instead of sleeping uselessly."
     )]
     async fn page_wait_for_timeout(
         &self,

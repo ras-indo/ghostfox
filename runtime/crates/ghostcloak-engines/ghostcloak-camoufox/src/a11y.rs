@@ -415,7 +415,7 @@ pub(crate) fn rect_ref_js(r: &str) -> String {
   var el = (window.__gfxRefs || new Map()).get({r});
   // Fallback: treat the ref as a CSS selector. page_a11y only registers
   // INTERACTIVE elements, so plain container divs (slider handles, resize
-  // grips) never got a ref — passing '.geetest_btn' used to hard-fail as
+  // grips) never got a ref — passing '.slider-knob' used to hard-fail as
   // STALE-REF. Same fallback pixels_ref_js already uses.
   if (!el || !el.isConnected) {{
     try {{ el = document.querySelector({r}); }} catch (e) {{ el = null; }}
@@ -449,7 +449,7 @@ pub(crate) fn rect_ref_js(r: &str) -> String {
 /// v0.6.2 SUPERMAN GLASSES: render the element a ref points at
 /// (canvas / img / background-image) into a compact luminance grid the
 /// agent READS as numbers — a text-model-friendly way to literally
-/// SEE shapes: captcha holes show as darker cells, skies at the top,
+/// SEE shapes: dark holes show as darker cells, skies at the top,
 /// upright vs tilted objects, image layout. Kicks off async image
 /// loading; poll with pixels_poll_js().
 pub(crate) fn pixels_ref_js(r: &str, gw: u32, gh: u32) -> String {
@@ -525,9 +525,9 @@ pub(crate) fn pixels_poll_js() -> &'static str {
 
 /// v0.6.3 PAGE_CONTRAST — the high-pass filter as a native tool.
 /// Born from the bilibili icon-click solve: |gray - gaussian_blur(gray)|
-/// makes anything blended into a background VISIBLE (captcha characters
-/// on photos, watermarks, hidden strokes). The technique that beat the
-/// captcha we thought needed a vision model — now every agent has it.
+/// makes anything blended into a background VISIBLE (watermark text,
+/// faint strokes, characters over photos). The technique that replaced
+/// a vision model — now every agent has it.
 /// Renders the element's image (canvas / img / background-image) as a
 /// grid of local-contrast digits 0-9 (0 = flat, 9 = strong edge).
 pub(crate) fn contrast_ref_js(r: &str, gw: u32, gh: u32, radius: u32) -> String {

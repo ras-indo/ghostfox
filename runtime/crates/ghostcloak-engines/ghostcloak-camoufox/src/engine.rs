@@ -1410,7 +1410,7 @@ impl CamoufoxPage {
         let sid = self.session_id().await?;
         // DOM semantics: `buttons` is the state AFTER the event. On
         // mouseup the button is no longer held — sending buttons=1 there
-        // makes pointer-capturing pages (GeeTest etc.) treat the release
+        // makes pointer-capturing pages (anti-bot sliders etc.) treat the release
         // as "still pressed" and the drag never completes ("Incomplete").
         let held = if ty == "mouseup" { 0 } else { buttons };
         let payload = match ty {
@@ -1442,8 +1442,8 @@ impl CamoufoxPage {
     /// arc bulge, ease-in-out velocity, sub-pixel tremor and a small
     /// overshoot+correction at the end. Returns (x, y, delay_ms) triples.
     ///
-    /// v0.6.1 CAPTCHA HARDENING — the timing model matters more than the
-    /// geometry for behavioral captchas (GeeTest profiles the drag
+    /// v0.6.1 DRAG TIMING — the timing model matters more than the
+    /// geometry for behavioral sliders (profilers read the drag
     /// time-series): total duration scales with distance (~4.5-6.5ms/px,
     /// a 160px human drag takes 1-1.5s, not 300ms), velocity is phased
     /// (slow start, cruise, careful approach, landing dance), real

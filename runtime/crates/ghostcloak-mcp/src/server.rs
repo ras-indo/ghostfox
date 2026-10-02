@@ -1299,33 +1299,32 @@ fn semantic_delta(old: &serde_json::Value, new: &serde_json::Value) -> serde_jso
         };
         let mut fields: Vec<serde_json::Value> = Vec::new();
         const FLAGS: [&str; 8] = [
-            "visible",
-            "enabled",
-            "disabled",
-            "checked",
-            "expanded",
-            "selected",
-            "pressed",
+            "visible", "enabled", "disabled", "checked", "expanded", "selected", "pressed",
             "focused",
         ];
         for f in FLAGS {
             let a = o["state"][f].as_bool();
             let b = n["state"][f].as_bool();
             if a.is_some() && a != b {
-                fields.push(serde_json::json!({ "field": format!("state.{f}"), "from": a, "to": b }));
+                fields
+                    .push(serde_json::json!({ "field": format!("state.{f}"), "from": a, "to": b }));
             }
         }
         for f in ["text", "name"] {
             let a = s(o, &["semantic", f]);
             let b = s(n, &["semantic", f]);
             if a != b {
-                fields.push(serde_json::json!({ "field": format!("semantic.{f}"), "from": a, "to": b }));
+                fields.push(
+                    serde_json::json!({ "field": format!("semantic.{f}"), "from": a, "to": b }),
+                );
             }
         }
         let a_val = o["dom"]["attributes"]["value"].clone();
         let b_val = n["dom"]["attributes"]["value"].clone();
         if a_val != b_val {
-            fields.push(serde_json::json!({ "field": "dom.attributes.value", "from": a_val, "to": b_val }));
+            fields.push(
+                serde_json::json!({ "field": "dom.attributes.value", "from": a_val, "to": b_val }),
+            );
         }
         // geometry: >2px viewport movement counts as a transition
         let ov = &o["geometry"]["viewport"];
@@ -1403,7 +1402,9 @@ fn semantic_delta(old: &serde_json::Value, new: &serde_json::Value) -> serde_jso
         page_diff["changed"] = serde_json::json!(true);
     }
 
-    let has_changes = added + removed + changed > 0 || !visual_changed.is_empty() || page_diff["changed"] == serde_json::json!(true);
+    let has_changes = added + removed + changed > 0
+        || !visual_changed.is_empty()
+        || page_diff["changed"] == serde_json::json!(true);
     serde_json::json!({
         "baseline_snapshot": s(old, &["snapshot", "id"]),
         "current_snapshot": s(new, &["snapshot", "id"]),
@@ -4831,9 +4832,7 @@ impl GhostcloakServer {
             max_nodes,
         }): Parameters<SemanticParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
-                let v = self
-            .take_semantic(&session_id, &page_id, max_nodes)
-            .await?;
+                let v = self.take_semantic(&session_id, &page_id, max_nodes).await?;
         // Every baseline-setting semantic read refreshes the per-page store
         // that page_semantic_diff compares against.
         {
@@ -4910,9 +4909,7 @@ impl GhostcloakServer {
             update_baseline,
         }): Parameters<SemanticDiffParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
-        let new = self
-            .take_semantic(&session_id, &page_id, max_nodes)
-            .await?;
+        let new = self.take_semantic(&session_id, &page_id, max_nodes).await?;
         let old = {
             let st = self.state.read().await;
             st.semantic_baselines.get(&page_id).cloned()
@@ -4946,7 +4943,6 @@ impl GhostcloakServer {
         );
         Ok(text_result(delta.to_string()))
     }
-
 
     #[tool(
         description = "SEMANTIC QUERY — search the semantic world model (page_semantic snapshot) by \

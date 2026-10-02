@@ -1681,6 +1681,226 @@ const SEMANTIC_JS: &str = r#"(() => {
   return out;
 })()"#;
 
+const SCENE_JS: &str = r#"(async () => {
+  const MAX_SCENES = 50;
+  const out = { scenes: [] };
+  let seq = 0;
+
+  function geom(el) {
+    try {
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      const visible = !!(r.width || r.height) && cs.visibility !== "hidden" && cs.display !== "none";
+      return {
+        visible: visible,
+        viewport: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
+        center: { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }
+      };
+    } catch (e) {
+      return { visible: false, viewport: { x: 0, y: 0, width: 0, height: 0 }, center: { x: 0, y: 0 } };
+    }
+  }
+
+  function nextSceneId(ctx) {
+    seq += 1;
+    return ctx + ".scene." + String(seq).padStart(3, "0");
+  }
+
+  function txt(node) {
+    return node && node.textContent ? node.textContent.trim().replace(/\s+/g, " ") : "";
+  }
+
+  function inferSvgKind(title, desc, clsAndAria, hasAxis, hasLegend, markers) {
+    const hay = (title + " " + desc + " " + clsAndAria).toLowerCase();
+    if (hasAxis && (hasLegend || /chart|revenue|sales|plot|graph|bar|line/.test(hay))) {
+      return { kind: "chart", confidence: 0.85, why: "axis+legend/title keywords" };
+    }
+    if (/diagram|flow|process|workflow|checkout/.test(hay)) {
+      return { kind: "diagram", confidence: 0.8, why: "diagram keywords in title/aria" };
+    }
+    if (hasAxis) {
+      return { kind: "plot", confidence: 0.7, why: "axis present" };
+    }
+    if (/map|geo|terrain/.test(hay)) {
+      return { kind: "map", confidence: 0.7, why: "map keywords" };
+    }
+    if (markers > 0) {
+      return { kind: "diagram", confidence: 0.6, why: "markers present" };
+    }
+    return { kind: "unknown", confidence: 0.5, why: "no structural signal" };
+  }
+
+  function svgScene(svg) {
+    const ctx = "page.main";
+    const titleNode = svg.querySelector("title");
+    const descNode = svg.querySelector("desc");
+    const aria = (svg.getAttribute("aria-label") || "").trim();
+    const role = (svg.getAttribute("role") || "").trim();
+    const title = txt(titleNode) || aria;
+    const desc = txt(descNode);
+    const textLabels = Array.from(svg.querySelectorAll("text"))
+      .map(t => txt(t)).filter(Boolean).slice(0, 40);
+    const axisEl = svg.querySelector('[class*="axis"], [id*="axis"], [class*="grid"], [id*="grid"]');
+    const legendEl = svg.querySelector('[class*="legend"], [id*="legend"]');
+    const series = Array.from(svg.querySelectorAll('[class*="series"], [data-series]')).map(g => ({
+      id: g.getAttribute("data-series") || (g.getAttribute("class") || "").trim(),
+      marks: g.children.length
+    }));
+    const markers = svg.querySelectorAll("marker, [marker-end], [class*='marker']").length;
+    const shapes = {
+      rect: svg.querySelectorAll("rect").length,
+      circle: svg.querySelectorAll("circle").length,
+      path: svg.querySelectorAll("path").length,
+      line: svg.querySelectorAll("line").length,
+      text: svg.querySelectorAll("text").length,
+      group: svg.querySelectorAll("g").length
+    };
+    const clsAndAria = (svg.getAttribute("class") || "") + " " + aria;
+    const ik = inferSvgKind(title, desc, clsAndAria, !!axisEl, !!legendEl, markers);
+    const evidence = [
+      { source: "dom", value: "svg structure: " + (titleNode ? "<title> present; " : "") + (descNode ? "<desc> present; " : "") + textLabels.length + " text labels; shapes " + JSON.stringify(shapes) },
+      { source: "accessibility", value: role ? "role=" + role : (aria ? "aria-label=" + aria : "no ARIA on svg") },
+      { source: "inferred", value: "kind=" + ik.kind + " via " + ik.why },
+      { source: "derived", value: "geometry from getBoundingClientRect" }
+    ];
+    return {
+      id: nextSceneId(ctx),
+      surface: "svg",
+      type: "scene",
+      kind: ik.kind,
+      role: role,
+      name: title,
+      description: desc,
+      text: desc || title,
+      state: { visible: geom(svg).visible },
+      geometry: geom(svg),
+      properties: {
+        svg: {
+          title: title,
+          desc: desc,
+          text_labels: textLabels,
+          axis: !!axisEl,
+          legend: !!legendEl,
+          series: series,
+          markers: markers,
+          shapes: shapes
+        },
+        dom_selector: svg.id ? '#' + svg.id : svg.tagName.toLowerCase()
+      },
+      relationships: [{ relation: "inside", target: ctx }],
+      actions: [],
+      evidence: evidence,
+      confidence: ik.confidence
+    };
+  }
+
+  async function canvasScene(cv) {
+    const ctx = "page.main";
+    const g = geom(cv);
+    const aria = (cv.getAttribute("aria-label") || "").trim();
+    const role = (cv.getAttribute("role") || "").trim();
+    const w = cv.width, h = cv.height;
+    const props = { width: w, height: h, aria_label: aria, role: role };
+    const evidence = [
+      { source: "dom", value: "canvas " + w + "x" + h + (aria ? ", aria-label=" + aria : "") },
+      { source: "accessibility", value: role ? "role=" + role : "no role on canvas" }
+    ];
+    let conf = 0.5;
+    let kind = "unknown";
+    let note = "no DOM structure; visual content is pixels only";
+    try {
+      // toDataURL composites internally — does NOT create/mutate a context.
+      const url = cv.toDataURL("image/png");
+      props.pixel_read = { data_url_bytes: url.length };
+      if (url.length < 3000) {
+        props.pixel_read.blank = true;
+        kind = "empty";
+        conf = 0.9;
+        note = "near-empty canvas (tiny data payload)";
+        evidence.push({ source: "pixel", value: "toDataURL payload " + url.length + " bytes — blank" });
+      } else {
+        props.pixel_read.blank = false;
+        const img = new Image();
+        const loaded = new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+        img.src = url;
+        await loaded;
+        const S = 48;
+        const tmp = document.createElement("canvas");
+        tmp.width = S; tmp.height = S;
+        const tg = tmp.getContext("2d");
+        tg.drawImage(img, 0, 0, S, S);
+        const d = tg.getImageData(0, 0, S, S).data;
+        const n = S * S;
+        let sum = 0, sq = 0;
+        const buckets = {};
+        for (let i = 0; i < d.length; i += 4) {
+          const r = d[i], gg = d[i + 1], b = d[i + 2];
+          const lum = 0.2126 * r + 0.7152 * gg + 0.0722 * b;
+          sum += lum; sq += lum * lum;
+          const key = (r >> 5) + "-" + (gg >> 5) + "-" + (b >> 5);
+          buckets[key] = (buckets[key] || 0) + 1;
+        }
+        const mean = sum / n;
+        const variance = Math.max(sq / n - mean * mean, 0);
+        const top = Object.entries(buckets).sort((a, b2) => b2[1] - a[1]).slice(0, 5)
+          .map(([k, c]) => ({ color_rgb: k.split("-").map(x => (parseInt(x, 10) << 5)).join(","), share_pct: Math.round(c / n * 1000) / 10 }));
+        props.pixel_read.luminance = { mean: Math.round(mean * 10) / 10, std: Math.round(Math.sqrt(variance) * 10) / 10 };
+        props.pixel_read.dominant_colors = top;
+        conf = 0.6;
+        note = "pixel stats derived from a 48x48 probe (no model inference); use page_pixels/page_screenshot to read content";
+        evidence.push({ source: "pixel", value: "toDataURL -> temp 48x48 probe: luminance mean/std + dominant colors" });
+        evidence.push({ source: "inferred", value: "canvas scene-type NOT inferred from pixels (no model) — kind left unknown unless aria says otherwise" });
+      }
+    } catch (e) {
+      props.pixel_read = { error: String((e && e.name) || e) };
+      note = "pixel read blocked (likely tainted canvas): " + String((e && e.name) || e);
+      evidence.push({ source: "pixel", value: "read blocked: " + String((e && e.name) || e) });
+      conf = 0.4;
+    }
+    const hay = (aria + " " + (cv.getAttribute("title") || "")).toLowerCase();
+    if (/chart|graph|plot|spark/.test(hay)) { kind = "chart"; conf = Math.max(conf, 0.7); evidence.push({ source: "inferred", value: "kind from aria-label keywords" }); }
+    else if (/map|geo/.test(hay)) { kind = "map"; conf = Math.max(conf, 0.7); evidence.push({ source: "inferred", value: "kind from aria-label keywords" }); }
+    else if (/game/.test(hay)) { kind = "game"; conf = Math.max(conf, 0.7); evidence.push({ source: "inferred", value: "kind from aria-label keywords" }); }
+    evidence.push({ source: "derived", value: "geometry from getBoundingClientRect" });
+    return {
+      id: nextSceneId(ctx),
+      surface: "canvas",
+      type: "scene",
+      kind: kind,
+      role: role,
+      name: aria || ("canvas " + w + "x" + h),
+      description: note,
+      text: "",
+      state: { visible: g.visible },
+      geometry: g,
+      properties: { canvas: props, dom_selector: cv.id ? '#' + cv.id : "canvas" },
+      relationships: [{ relation: "inside", target: ctx }],
+      actions: [],
+      evidence: evidence,
+      confidence: conf
+    };
+  }
+
+  const rootSvgs = Array.from(document.querySelectorAll("svg")).filter(s => !s.ownerSVGElement);
+  const canvases = Array.from(document.querySelectorAll("canvas"));
+  for (const svg of rootSvgs) {
+    if (out.scenes.length >= MAX_SCENES) break;
+    try { out.scenes.push(svgScene(svg)); } catch (e) { /* isolate */ }
+  }
+  for (const cv of canvases) {
+    if (out.scenes.length >= MAX_SCENES) break;
+    try { out.scenes.push(await canvasScene(cv)); } catch (e) { /* isolate */ }
+  }
+  out.summary = {
+    svg: out.scenes.filter(s => s.surface === "svg").length,
+    canvas: out.scenes.filter(s => s.surface === "canvas").length,
+    total: out.scenes.length,
+    note: "scenes are extracted alongside the ui_node walk; svg = structure+label observations, canvas = pixel-derived stats (no model inference)"
+  };
+  return out;
+})()
+"#;
+
 const QUERY_JS: &str = r#"(()=>{
   const sel = "@@SEL@@", max = @@MAX@@, withText = @@TEXT@@, attrs = @@ATTRS@@;
   let nodes;
@@ -4409,13 +4629,29 @@ impl GhostcloakServer {
                 expression: expr,
             }))
             .await?;
+        let mut v: serde_json::Value = serde_json::from_str(&result_text(&r)).map_err(|e| {
+            rmcp::model::ErrorData::internal_error(format!("semantic snapshot parse: {e}"), None)
+        })?;
+        // Scene pass (async, separate): SVG structure graph + canvas pixel probe.
+        // Kept out of the node walk so an await can never stall the sync traversal.
+        let rs = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: SCENE_JS.to_string(),
+            }))
+            .await?;
+        v["scenes"] = match serde_json::from_str::<serde_json::Value>(&result_text(&rs)) {
+            Ok(sv) => sv["scenes"].clone(),
+            Err(_) => serde_json::json!([]),
+        };
         let _ = self.recorder.record(
             &session_id,
             "page_semantic",
             Some(&page_id),
             serde_json::json!({ "max_nodes": max_nodes.unwrap_or(400) }),
         );
-        Ok(r)
+        Ok(text_result(v.to_string()))
     }
 
     #[tool(

@@ -4832,7 +4832,7 @@ impl GhostcloakServer {
             max_nodes,
         }): Parameters<SemanticParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
-                let v = self.take_semantic(&session_id, &page_id, max_nodes).await?;
+        let v = self.take_semantic(&session_id, &page_id, max_nodes).await?;
         // Every baseline-setting semantic read refreshes the per-page store
         // that page_semantic_diff compares against.
         {

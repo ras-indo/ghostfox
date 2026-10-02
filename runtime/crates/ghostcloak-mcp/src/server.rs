@@ -4604,18 +4604,21 @@ impl GhostcloakServer {
                 if role == t {
                     s += 0.2;
                 }
-                if let Some(acts) = n["actions"].as_array() {
-                    if acts.iter().any(|a| a["type"].as_str().unwrap_or("") == act) {
-                        s += 0.15;
-                    }
-                }
-                if n["state"]["visible"].as_bool().unwrap_or(false) {
-                    s += 0.05;
-                }
-                if n["state"]["enabled"].as_bool().unwrap_or(false) {
-                    s += 0.05;
-                }
+                // Require an actual similarity signal (name/text/id/role) BEFORE
+                // stacking ergonomics bonuses — otherwise every visible node
+                // "matches" an unknown target.
                 if s > 0.0 {
+                    if let Some(acts) = n["actions"].as_array() {
+                        if acts.iter().any(|a| a["type"].as_str().unwrap_or("") == act) {
+                            s += 0.15;
+                        }
+                    }
+                    if n["state"]["visible"].as_bool().unwrap_or(false) {
+                        s += 0.05;
+                    }
+                    if n["state"]["enabled"].as_bool().unwrap_or(false) {
+                        s += 0.05;
+                    }
                     scored.push((s, n.clone()));
                 }
             }

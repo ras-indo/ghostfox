@@ -138,6 +138,7 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
         "page_emulate",
         "page_search",
         "page_query",
+        "page_semantic",
         "page_dropdown",
         "page_scroll_to_text",
         "page_fill_form",
@@ -162,8 +163,9 @@ fn mcp_stdio_contract_lists_and_calls_identity_tools() {
     // (7: captcha_solve, page_geetest_click, page_geetest_slide,
     // page_captcha_rotate, page_captcha_ocr, page_hcaptcha, page_vision)
     // = 69 — captcha solving and on-device model inference were removed from
-    // the gateway (screenshot + generic vision/pixel tools remain).
-    assert_eq!(names.len(), 69, "tools: {names:?}");
+    // the gateway (screenshot + generic vision/pixel tools remain), PLUS
+    // page_semantic (semantic world-model snapshot) = 70.
+    assert_eq!(names.len(), 70, "tools: {names:?}");
 
     let generated = request(
         &mut child,

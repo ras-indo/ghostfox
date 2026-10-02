@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`page_semantic` — Semantic Browser Model snapshot (spec: context →
+  surface → ui_node → entity → relationship → action)** — the page as a
+  STRUCTURED WORLD MODEL instead of raw HTML/coordinates. Walks the DOM +
+  open shadow roots + same-origin iframes and returns: `contexts[]`
+  (page.main / frame.* with `same_origin`, cross-origin security state and
+  `fallback: visual`), `surfaces[]` (web / shadow_dom / iframe),
+  `ui_nodes[]` with context-qualified stable ids
+  (`page.main.node.N`, `frame.X.id.foo`), `dom{tag,attributes}`,
+  `semantic{role,name,text}`, `state{visible,enabled,disabled,focused,
+  selected,checked,expanded,pressed}`, `geometry{viewport,center}`,
+  `actions[{type,available}]`, `evidence[{source:dom|accessibility}]` and
+  `confidence` (1.0 explicit DOM/ARIA = observed, 0.9 implicit);
+  `relationships[]` (inside/contains), `forms[]` (semantic field groups:
+  role/name/required/value + submit actions), `tables[]` (columns+rows as
+  semantic groups), `provenance_summary{observed,derived}` — inference is
+  never presented as observation. `max_nodes` caps the walk (default 400,
+  `truncated` flag). Composes with existing tools: find the semantic target
+  here → act via page_click/page_drag/page_fill_form.
+
 - **`page_wait_for_timeout`** — explicit sleep/delay tool (blocked
   `timeout_ms` 1–60000, returns `{waited_ms, url}`). Fills the
   missing-tool gap for "wait until the challenge widget paints" when

@@ -1208,6 +1208,304 @@ const SEARCH_JS: &str = r#"(()=>{
   return {found, items, truncated: found > items.length};
 })()"#;
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SemanticParams {
+    session_id: String,
+    page_id: String,
+    /// Max semantic nodes to return (default 400). The walk stops and sets truncated=true.
+    max_nodes: Option<u32>,
+}
+
+const SEMANTIC_JS: &str = r#"(() => {
+  const MAX = @@MAX@@;
+  const out = {
+    snapshot: { id: "snapshot." + Date.now(), page: { url: location.href, title: document.title || "" } },
+    contexts: [{ id: "page.main", type: "page" }],
+    surfaces: [{ id: "surface.web.main", type: "web", context: "page.main" }],
+    ui_nodes: [],
+    relationships: [],
+    forms: [],
+    tables: [],
+    provenance_summary: { observed: 0, derived: 0 }
+  };
+  let seq = 0;
+  const stop = { n: false };
+
+  function geom(el) {
+    let r;
+    try { r = el.getBoundingClientRect(); }
+    catch (e) { r = { x: 0, y: 0, width: 0, height: 0 }; }
+    let cs = null;
+    try { cs = getComputedStyle(el); } catch (e) {}
+    const visible = !!(r.width || r.height) && (!cs || (cs.display !== "none" && cs.visibility !== "hidden"));
+    return {
+      viewport: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
+      center: { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) },
+      visible: visible, opacity: cs ? parseFloat(cs.opacity) : 1
+    };
+  }
+
+  function aName(el) {
+    let n = (el.getAttribute("aria-label") || "").trim();
+    if (n) return n;
+    const lb = el.getAttribute("aria-labelledby");
+    if (lb) {
+      for (const id of lb.split(/\s+/)) {
+        const t = document.getElementById(id);
+        if (t) { n = (t.textContent || "").trim(); if (n) return n; }
+      }
+    }
+    try { if (el.labels && el.labels.length) { n = (el.labels[0].textContent || "").trim(); if (n) return n; } } catch (e) {}
+    const ph = (el.getAttribute("placeholder") || "").trim();
+    if (ph) return ph;
+    const alt = (el.getAttribute("alt") || "").trim();
+    if (alt) return alt;
+    const tag = el.tagName;
+    if (["BUTTON", "A", "LEGEND", "SUMMARY", "TH", "LABEL", "OPTION", "CAPTION"].indexOf(tag) >= 0) {
+      n = (el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120);
+      if (n) return n;
+    }
+    const title = (el.getAttribute("title") || "").trim();
+    if (title) return title;
+    if (el.id) {
+      try {
+        const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+        if (l) { n = (l.textContent || "").trim(); if (n) return n; }
+      } catch (e) {}
+    }
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+      const nm = (el.getAttribute("name") || "").trim();
+      if (nm) return nm;
+    }
+    return "";
+  }
+
+  function implicitRole(el) {
+    const t = el.tagName;
+    if (t === "BUTTON") return "button";
+    if (t === "A" && el.hasAttribute("href")) return "link";
+    if (t === "SELECT") return "combobox";
+    if (t === "TEXTAREA") return "textbox";
+    if (t === "INPUT") {
+      const ty = (el.type || "text").toLowerCase();
+      if (ty === "checkbox") return "checkbox";
+      if (ty === "radio") return "radio";
+      if (ty === "submit" || ty === "button" || ty === "reset" || ty === "image") return "button";
+      if (ty === "range") return "slider";
+      if (ty === "search") return "searchbox";
+      if (ty === "file") return "button";
+      return "textbox";
+    }
+    if (t === "IMG") return "img";
+    if (t === "UL" || t === "OL") return "list";
+    if (t === "LI") return "listitem";
+    if (t === "TABLE") return "table";
+    if (t === "TR") return "row";
+    if (t === "TD" || t === "TH") return "cell";
+    if (t === "NAV") return "navigation";
+    if (t === "HEADER") return "banner";
+    if (t === "FOOTER") return "contentinfo";
+    if (t === "MAIN") return "main";
+    if (t === "FORM") return "form";
+    if (t === "DIALOG") return "dialog";
+    if (t === "H1" || t === "H2" || t === "H3" || t === "H4" || t === "H5" || t === "H6") return "heading";
+    if (t === "SVG" || t === "CANVAS") return "img";
+    if (t === "AUDIO" || t === "VIDEO") return el.controls ? "button" : "";
+    if (t.indexOf("-") >= 0) return ""; // custom element: role comes from aria only
+    return "";
+  }
+
+  const INTERACTIVE = {
+    button: ["click"], link: ["click"], checkbox: ["click"], radio: ["click"],
+    combobox: ["click", "type", "select"], textbox: ["focus", "type"],
+    searchbox: ["focus", "type"], slider: ["drag"], tab: ["click"],
+    menuitem: ["click"], option: ["click"], img: ["click"], cell: ["click"],
+    heading: [], listitem: ["click"], form: ["submit"], dialog: []
+  };
+
+  function actionsFor(role, disabled) {
+    const base = INTERACTIVE[role] || [];
+    if (disabled && base.length) return [{ type: base[0], available: false, reason: "disabled" }];
+    return base.map(a => ({ type: a, available: true }));
+  }
+
+  function isSemantic(el, role) {
+    if (role) return true;
+    if (el.hasAttribute("aria-label") || el.hasAttribute("aria-labelledby") || el.hasAttribute("role")) return true;
+    return false;
+  }
+
+  function nextId(prefix, el) {
+    seq++;
+    if (el.id) return prefix + ".id." + el.id;
+    return prefix + ".node." + String(seq).padStart(3, "0");
+  }
+
+  function attrsOf(el) {
+    const keep = ["id", "class", "type", "name", "href", "src", "role", "aria-label",
+      "placeholder", "required", "disabled", "value", "for", "title", "alt", "data-testid"];
+    const o = {};
+    for (const a of keep) {
+      const v = el.getAttribute(a);
+      if (v !== null) o[a] = String(v).slice(0, 300);
+    }
+    return o;
+  }
+
+  function visit(root, surface, ctx, parentId, depth) {
+    if (stop.n) return;
+    const els = [];
+    try {
+      const w = document.createTreeWalker(root instanceof Document ? root.documentElement : root, NodeFilter.SHOW_ELEMENT);
+      let cur = w.currentNode;
+      while (cur) { els.push(cur); cur = w.nextNode(); if (els.length > 2500) break; }
+    } catch (e) { return; }
+
+    for (const el of els) {
+      if (stop.n) return;
+      // recurse open shadow roots
+      if (el.shadowRoot) {
+        const hostId = el.getAttribute("data-testid") || el.tagName.toLowerCase();
+        out.surfaces.push({ id: "surface.shadow." + hostId + "." + seq, type: "shadow_dom", context: ctx });
+        out.relationships.push({ source: ctx, relation: "contains", target: "surface.shadow." + hostId });
+        visit(el.shadowRoot, "shadow_dom", ctx, parentId, depth + 1);
+      }
+      // recurse same-origin iframes
+      if (el.tagName === "IFRAME") {
+        const fid = "frame." + (el.id || el.name || String(out.contexts.filter(c => c.type === "iframe").length + 1));
+        let same = false;
+        try {
+          const d = el.contentDocument;
+          same = !!(d && d.documentElement);
+          if (same) {
+            out.contexts.push({ id: fid, type: "iframe", parent: ctx, src: el.getAttribute("src") || "", same_origin: true });
+            out.surfaces.push({ id: "surface.web." + fid, type: "web", context: fid });
+            visit(d, "iframe", fid, null, depth + 1);
+          }
+        } catch (e) { same = false; }
+        if (!same) {
+          out.contexts.push({ id: fid, type: "iframe", parent: ctx, src: el.getAttribute("src") || "", same_origin: false });
+          out.surfaces.push({
+            id: "surface.iframe." + fid, type: "iframe", context: fid,
+            security: { same_origin: false, internal_dom_access: false, reason: "cross_origin_restricted" },
+            fallback: { available: true, method: "visual" }
+          });
+          out.provenance_summary.observed += 1;
+        }
+        continue;
+      }
+
+      let role = (el.getAttribute("role") || "").trim();
+      const explicitRole = !!role;
+      if (!role) role = implicitRole(el);
+      if (!isSemantic(el, role)) continue;
+      if (out.ui_nodes.length >= MAX) { stop.n = true; return; }
+
+      const name = aName(el);
+      const g = geom(el);
+      const tag = el.tagName.toLowerCase();
+      const disabled = el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true";
+      const id = nextId(ctx, el);
+      const ev = [{ source: "dom", value: tag + (el.id ? '#' + el.id : "") }];
+      ev.push({ source: "accessibility", value: "role=" + (role || "generic") + (name ? ",name=" + name.slice(0, 60) : "") });
+      out.provenance_summary.observed += 1;
+      out.provenance_summary.derived += 1;
+
+      const node = {
+        id: id, surface: surface, context: ctx,
+        dom: { tag: tag, attributes: attrsOf(el) },
+        semantic: {
+          role: role || "generic", name: name,
+          text: ["BUTTON", "A", "LABEL", "LEGEND", "TH", "TD", "LI", "OPTION"].indexOf(el.tagName) >= 0
+            ? (el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 120) : ""
+        },
+        state: {
+          visible: g.visible,
+          enabled: g.visible && !disabled,
+          disabled: disabled,
+          focused: document.activeElement === el,
+          selected: el.getAttribute("aria-selected") === "true" || el.selected === true,
+          checked: el.getAttribute("aria-checked") === "true" || el.checked === true,
+          expanded: el.getAttribute("aria-expanded") === "true",
+          pressed: el.getAttribute("aria-pressed") === "true"
+        },
+        geometry: { viewport: g.viewport, center: g.center },
+        actions: actionsFor(role || "generic", disabled),
+        evidence: ev,
+        confidence: explicitRole || role ? 1.0 : 0.9
+      };
+      out.ui_nodes.push(node);
+      if (parentId) {
+        out.relationships.push({ source: id, relation: "inside", target: parentId });
+      }
+
+      // form grouping
+      if (el.tagName === "FORM") {
+        const fields = [];
+        try {
+          for (const f of el.querySelectorAll("input, textarea, select, button")) {
+            fields.push({
+              id: id + ".field." + (f.id || f.name || String(fields.length)),
+              role: implicitRole(f) || "generic",
+              name: aName(f),
+              type: (f.getAttribute("type") || f.tagName.toLowerCase()).toLowerCase(),
+              required: f.hasAttribute("required"),
+              value: f.tagName === "BUTTON" ? null : String(f.value || "").slice(0, 200)
+            });
+          }
+        } catch (e) {}
+        out.forms.push({
+          id: id, name: name || el.getAttribute("aria-label") || "",
+          fields: fields,
+          actions: ["submit", "reset"],
+          evidence: [{ source: "dom", value: "form" + (el.id ? '#' + el.id : "") }],
+          confidence: 1.0
+        });
+      }
+
+      // table grouping
+      if (el.tagName === "TABLE") {
+        const cols = [];
+        try {
+          const ths = el.querySelectorAll("thead th, tr:first-child th");
+          for (const th of ths) cols.push({ id: id + ".col." + cols.length, name: (th.textContent || "").trim().slice(0, 80) });
+        } catch (e) {}
+        const rows = [];
+        try {
+          const trs = el.querySelectorAll("tbody tr, tr");
+          let ri = 0;
+          for (const tr of trs) {
+            if (ri >= 100) break;
+            const tds = tr.querySelectorAll("td, th");
+            if (!tds.length) continue;
+            const cells = [];
+            let ci = 0;
+            for (const td of tds) {
+              const col = cols[ci] ? cols[ci].id : id + ".col." + ci;
+              cells.push({ column: col, value: (td.textContent || "").trim().replace(/\s+/g, " ").slice(0, 200) });
+              ci++;
+            }
+            rows.push({ id: id + ".row." + ri, cells: cells });
+            ri++;
+          }
+        } catch (e) {}
+        out.tables.push({
+          id: id, name: name || "", columns: cols, rows: rows,
+          evidence: [{ source: "dom", value: "table" + (el.id ? '#' + el.id : "") }],
+          confidence: 1.0
+        });
+      }
+    }
+  }
+
+  try { visit(document, "web", "page.main", null, 0); }
+  catch (e) { out.error = "walk failed: " + e.message; }
+
+  out.truncated = stop.n;
+  out.node_count = out.ui_nodes.length;
+  return out;
+})()"#;
+
 const QUERY_JS: &str = r#"(()=>{
   const sel = "@@SEL@@", max = @@MAX@@, withText = @@TEXT@@, attrs = @@ATTRS@@;
   let nodes;
@@ -3913,6 +4211,34 @@ impl GhostcloakServer {
             "page_query",
             Some(&page_id),
             serde_json::json!({ "selector": selector }),
+        );
+        Ok(r)
+    }
+
+    #[tool(
+        description = "SEMANTIC BROWSER SNAPSHOT — the page as a STRUCTURED WORLD MODEL, not raw HTML or coordinates (spec: context -> surface -> ui_node -> entity -> relationship -> action). Walks DOM + open shadow roots + same-origin iframes and returns JSON: contexts[] (page.main, frame.* with same_origin + cross-origin security state and fallback:visual), surfaces[] (web / shadow_dom / iframe), ui_nodes[] [{id (context-qualified: page.main.node.N, frame.X.id.foo), surface, context, dom{tag,attributes}, semantic{role,name,text}, state{visible,enabled,disabled,focused,selected,checked,expanded,pressed}, geometry{viewport,center} in page pixels, actions[{type,available}], evidence[{source:dom|accessibility}], confidence}] (DOM/ARIA facts = observed confidence 1.0, implicit semantics = 0.9), relationships[] (inside / contains), forms[] (fields with role/name/required/value + submit actions — reason over the FORM, not per-coordinates), tables[] (columns + rows as semantic groups: filter rows by cell value), plus provenance_summary {observed, derived} so inference never pretends to be observed. Coordinate fallback exists but identity is semantic-first. Use with page_click/page_drag/page_fill_form: find the semantic target here, then act on its geometry or ref. max_nodes caps the walk (default 400, truncated flag set)."
+    )]
+    async fn page_semantic(
+        &self,
+        Parameters(SemanticParams {
+            session_id,
+            page_id,
+            max_nodes,
+        }): Parameters<SemanticParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let expr = SEMANTIC_JS.replace("@@MAX@@", &max_nodes.unwrap_or(400).to_string());
+        let r = self
+            .page_eval(Parameters(PageEvalParams {
+                session_id: session_id.clone(),
+                page_id: page_id.clone(),
+                expression: expr,
+            }))
+            .await?;
+        let _ = self.recorder.record(
+            &session_id,
+            "page_semantic",
+            Some(&page_id),
+            serde_json::json!({ "max_nodes": max_nodes.unwrap_or(400) }),
         );
         Ok(r)
     }

@@ -760,7 +760,12 @@ pub fn slide_gap_no_full(bg: &image::GrayImage, slice: &image::RgbaImage) -> Res
     }
     let (scores, best) = ncc_scan(&bg_plane, bw, bh, &pat, &idxs, pw, ph, mean_p, ss_p);
     const NCC_FLOOR: f32 = 0.5;
-    const PEAK_ZONE: u32 = 8;
+    // The runner-up must come from outside the peak's cluster, not just its
+    // immediate neighborhood: slide puzzles correlate horizontally (the
+    // hole's shadow and repeated shading run along the drag axis), so the
+    // peak's shoulder stays above the margin for well over 8px — a narrow
+    // zone reports the peak against itself and refuses an honest match.
+    const PEAK_ZONE: u32 = 16;
     const PEAK_MARGIN: f32 = 0.05;
     if best.0 < NCC_FLOOR {
         return Err(anyhow!(

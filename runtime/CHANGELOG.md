@@ -101,6 +101,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`page_geetest_slide` ambiguity check uses a cluster-aware peak zone
+  (PEAK_ZONE 8 → 16)** — the runner-up scan excluded only ±8px around the
+  winning match, but slide puzzles correlate *horizontally*: the hole's
+  shadow and repeated shading keep the peak's own shoulder above the
+  0.05 margin for well over 8px. Measured on a live GeeTest v4 adaptive
+  challenge: best 0.60, runner-up 0.57 at dx=−9 (peak cluster), while
+  the true distant rival sat at 0.47 — the check compared the peak
+  against itself and refused with `ambiguous slice match`. With ±16px
+  the runner-up is 0.47 (gap 0.12) and the match passes; python
+  replication over the same downloaded layer images confirmed the
+  geometry.
+
 - **`page_geetest_slide` waits for the layer layout (0x0 poll)** — the
   div-mode background/slice rect can read 0x0 for a moment while the
   challenge is still animating in or the holder has not been laid out;

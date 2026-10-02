@@ -406,8 +406,9 @@ recognition, not correlation).
 The realistic paths:
 1. HOST VISION TIER (ready today): screenshot -> host multimodal
    model reads icon order + character positions -> engine clicks.
-2. LOCAL ML (Tier 4 roadmap): small classifier on rten —
-   the RTEN runtime is already embedded via ocrs.
+2. LOCAL ML — DROPPED (2026-10): rten/ocrs/ort removed from the
+   runtime; no local model tier exists. Host-vision or generic
+   tools only.
 3. All OTHER GeeTest variants are solved and stable.
 
 ### Icon/word-click — FINAL SOLVE (trained eyes, 0.5s, 100% runs)
@@ -422,9 +423,10 @@ from ravizhan/geetest-v3-click-crack (AGPL-3.0, attributed):
 | `siamese.onnx` | strip-glyph vs field-glyph embedding similarity -> click order |
 
 Shipped in `models/geetest_click/`. Solver in `tools/geetest-click/`.
-Solve time ~0.5s CPU. VLM prompting, ddddocr, PaddleOCR, 9 classical
-CV methods, saturation masks — ALL beaten by this pair. ddddocr still
-useful as a strip-read cross-check (reads `香汁大虾` perfectly).
+Solve time ~0.5s CPU (historical). VLM prompting, ddddocr, PaddleOCR,
+9 classical CV methods, saturation masks — ALL beaten by this pair.
+ARCHIVE: this whole model stack (ONNX files + rten/ort + ddddocr) was
+removed 2026-10 — the gateway ships no model inference anymore.
 
 Verified:
 - Local testbed (bilibili gt via passport API + own page): 3/3 SUCCESS
@@ -502,8 +504,9 @@ placeholder 输入图片中的内容, maxlength 5, inside `.dialog__body`.
 It activates when the login backend escalates (repeated credential
 failures / risk). Trigger blocked today by bilibili's login API rate
 limit (Timed out wall after ~10 attempts). NEXT SESSION: fresh
-identity -> 2-3 wrong-credential cycles -> the dialog opens -> the
-ddddocr native tool solves it (pipeline ready).
+identity -> 2-3 wrong-credential cycles -> the dialog opens.
+NOTE: no captcha solver tooling remains (removed 2026-10) — capture
+with page_screenshot / page_semantic and handle manually if needed.
 
 Dead ends mapped (do not retry): buff.163.com login = NetEase Yidun
 (iframe dl.reg.163.com), NOT GeeTest; douyu.com = anti-bot shell page;
@@ -557,7 +560,8 @@ the solve path — Python stays only as the R&D lab):
 |---|---|---|
 | page_geetest_click / page_geetest_slide / page_captcha_rotate / page_captcha_ocr | icon-click / slide / rotate / normal text captcha | **Removed** (2026-10): model stack gone (rten/ort/ddddocr/YOLO); generic tools only. Knowledge below kept for reference. |
 
-Port gotchas (cost real hours):
+Port gotchas (cost real hours) — ARCHIVED: ddddocr/rten/ort were
+removed 2026-10, kept only as migration knowledge:
 1. ddddocr output is [T, 1, C] sequence-major, NOT [1, T, C].
 2. The common.onnx model pairs with CHARSET_BETA (not OLD) — BETA[306]='w' etc.
 3. The upstream siamese is dynamic-quantized: rten mangles ConvInteger
@@ -574,7 +578,7 @@ recordings/zjyjgwue/screenshots/0001..0010.
 |---|---|---|---|---|
 | 1 | GeeTest v3 slide | demos.geetest.com/slide-popup | 验证成功 | canvas bg-vs-fullbg diff, LARGEST blob = hole (JPEG-noise trap: use diff>40 + closing 5x5, not raw threshold), piece solid alpha>128 left edge, drag = hole_x0 - piece_x0 |
 | 2 | Rotate | 2captcha /demo/rotatecaptcha | 验证码通过！ | fixed-image sweep: reset -> rotate k*15deg -> check. Answer = 165deg (11 clicks). H/V edge heuristic is 4-way ambiguous (90deg period) — the SWEEP is deterministic |
-| 3 | Normal image captcha | 2captcha /demo/normal | 验证码通过！ | ddddocr classification (first try, "w9h5k") + type_ref + check |
+| 3 | Normal image captcha | 2captcha /demo/normal | 验证码通过！ | classification (ddddocr — REMOVED 2026-10) first try "w9h5k" + type_ref + check |
 | 4 | Cloudflare Turnstile | 2captcha /demo/cloudflare-turnstile | response token (dummy sitekey) | behavioral: scrollIntoView + click checkbox; response appears with NO challenge. Honest note: demo uses Cloudflare's test sitekey (XXXX.DUMMY.TOKEN) — real-site proof still pending |
 | 5 | GeeTest icon-click | passport.bilibili.com (REAL) | Verification Succeeded | NATIVE MCP tool page_geetest_click (YOLOv8s + siamese_float, rten) — attempt 1 |
 | 6 | TikTok OAuth + email OTP | tiktok.com | logged in (Messages: 2) | prior session's popup OAuth + Gmail OTP chase; session persists |

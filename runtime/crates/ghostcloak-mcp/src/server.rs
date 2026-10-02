@@ -823,6 +823,9 @@ pub(crate) struct ServerState {
     /// server-side so state survives page navigation (a page-global would
     /// be wiped on goto_url).
     pub(crate) exec_ns: HashMap<String, serde_json::Value>,
+    /// Per-page semantic baseline (snapshot before the last action) for
+    /// page_semantic_diff — the "world model" the observer diffs against.
+    pub(crate) semantic_baselines: HashMap<String, serde_json::Value>,
 }
 
 impl GhostcloakServer {
@@ -1214,6 +1217,213 @@ struct SemanticParams {
     page_id: String,
     /// Max semantic nodes to return (default 400). The walk stops and sets truncated=true.
     max_nodes: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SemanticDiffParams {
+    session_id: String,
+    page_id: String,
+    max_nodes: Option<u32>,
+    /// Replace the stored baseline with the current snapshot after diffing (default true).
+    update_baseline: Option<bool>,
+}
+
+/// Compare two semantic snapshots: A = baseline (before the action), B = current.
+/// Everything here is OBSERVED (two full walks); causal timing is explicitly
+/// labeled inference in observations[] — temporal adjacency is not proof.
+fn semantic_delta(old: &serde_json::Value, new: &serde_json::Value) -> serde_json::Value {
+    use std::collections::BTreeMap;
+    fn node_map<'a>(v: &'a serde_json::Value) -> BTreeMap<&'a str, &'a serde_json::Value> {
+        v["ui_nodes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n["id"].as_str().map(|i| (i, n)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn scene_map<'a>(v: &'a serde_json::Value) -> BTreeMap<&'a str, &'a serde_json::Value> {
+        v["scenes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| n["id"].as_str().map(|i| (i, n)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn s<'a>(v: &'a serde_json::Value, path: &[&str]) -> &'a str {
+        str_field(v, path)
+    }
+    fn brief(n: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "id": s(n, &["id"]),
+            "name": s(n, &["semantic", "name"]),
+            "role": s(n, &["semantic", "role"]),
+            "surface": s(n, &["surface"]),
+        })
+    }
+
+    let om = node_map(old);
+    let nm = node_map(new);
+    let mut transitions: Vec<serde_json::Value> = Vec::new();
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    let mut changed = 0usize;
+
+    for (id, n) in &nm {
+        if !om.contains_key(id) {
+            added += 1;
+            if transitions.len() < 100 {
+                let mut e = brief(n);
+                e["type"] = serde_json::json!("added");
+                transitions.push(e);
+            }
+        }
+    }
+    for (id, n) in &om {
+        if !nm.contains_key(id) {
+            removed += 1;
+            if transitions.len() < 100 {
+                let mut e = brief(n);
+                e["type"] = serde_json::json!("removed");
+                transitions.push(e);
+            }
+        }
+    }
+    for (id, n) in &nm {
+        let o = match om.get(id) {
+            Some(x) => *x,
+            None => continue,
+        };
+        let mut fields: Vec<serde_json::Value> = Vec::new();
+        const FLAGS: [&str; 8] = [
+            "visible",
+            "enabled",
+            "disabled",
+            "checked",
+            "expanded",
+            "selected",
+            "pressed",
+            "focused",
+        ];
+        for f in FLAGS {
+            let a = o["state"][f].as_bool();
+            let b = n["state"][f].as_bool();
+            if a.is_some() && a != b {
+                fields.push(serde_json::json!({ "field": format!("state.{f}"), "from": a, "to": b }));
+            }
+        }
+        for f in ["text", "name"] {
+            let a = s(o, &["semantic", f]);
+            let b = s(n, &["semantic", f]);
+            if a != b {
+                fields.push(serde_json::json!({ "field": format!("semantic.{f}"), "from": a, "to": b }));
+            }
+        }
+        let a_val = o["dom"]["attributes"]["value"].clone();
+        let b_val = n["dom"]["attributes"]["value"].clone();
+        if a_val != b_val {
+            fields.push(serde_json::json!({ "field": "dom.attributes.value", "from": a_val, "to": b_val }));
+        }
+        // geometry: >2px viewport movement counts as a transition
+        let ov = &o["geometry"]["viewport"];
+        let nv = &n["geometry"]["viewport"];
+        let moved = ["x", "y", "width", "height"]
+            .iter()
+            .filter_map(|k| {
+                let d = (nv[*k].as_f64().unwrap_or(0.0) - ov[*k].as_f64().unwrap_or(0.0)).abs();
+                if d > 2.0 {
+                    Some((*k, ov[*k].clone(), nv[*k].clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if !moved.is_empty() {
+            fields.push(serde_json::json!({
+                "field": "geometry.viewport",
+                "from": { "x": ov["x"], "y": ov["y"], "width": ov["width"], "height": ov["height"] },
+                "to": { "x": nv["x"], "y": nv["y"], "width": nv["width"], "height": nv["height"] },
+                "moved_px": moved.iter().map(|(k, _, _)| k).collect::<Vec<_>>()
+            }));
+        }
+        if !fields.is_empty() {
+            changed += 1;
+            if transitions.len() < 100 {
+                let mut e = brief(n);
+                e["type"] = serde_json::json!("changed");
+                e["changes"] = serde_json::Value::Array(fields);
+                transitions.push(e);
+            }
+        }
+    }
+
+    // Scenes: canvas visual change via pixel payload bytes, visibility, kind.
+    let o_sc = scene_map(old);
+    let n_sc = scene_map(new);
+    let mut visual_changed: Vec<serde_json::Value> = Vec::new();
+    for (id, n) in &n_sc {
+        let o = match o_sc.get(id) {
+            Some(x) => *x,
+            None => continue,
+        };
+        let mut reasons: Vec<String> = Vec::new();
+        let ob = o["properties"]["canvas"]["pixel_read"]["data_url_bytes"].as_u64();
+        let nb = n["properties"]["canvas"]["pixel_read"]["data_url_bytes"].as_u64();
+        if ob.is_some() && nb.is_some() && ob != nb {
+            reasons.push(format!("canvas pixel payload {ob:?} -> {nb:?} bytes"));
+        }
+        if o["state"]["visible"].as_bool() != n["state"]["visible"].as_bool() {
+            reasons.push("scene visibility changed".into());
+        }
+        if s(o, &["kind"]) != s(n, &["kind"]) {
+            reasons.push(format!("kind {} -> {}", s(o, &["kind"]), s(n, &["kind"])));
+        }
+        if !reasons.is_empty() {
+            visual_changed.push(serde_json::json!({
+                "id": id, "name": s(n, &["name"]), "surface": s(n, &["surface"]), "reasons": reasons
+            }));
+        }
+    }
+
+    // Page-level: url / title
+    let mut page_diff = serde_json::json!({ "changed": false });
+    let ou = s(old, &["snapshot", "page", "url"]);
+    let nu = s(new, &["snapshot", "page", "url"]);
+    let ot = s(old, &["snapshot", "page", "title"]);
+    let nt = s(new, &["snapshot", "page", "title"]);
+    if ou != nu {
+        page_diff["url"] = serde_json::json!({ "from": ou, "to": nu });
+        page_diff["changed"] = serde_json::json!(true);
+    }
+    if ot != nt {
+        page_diff["title"] = serde_json::json!({ "from": ot, "to": nt });
+        page_diff["changed"] = serde_json::json!(true);
+    }
+
+    let has_changes = added + removed + changed > 0 || !visual_changed.is_empty() || page_diff["changed"] == serde_json::json!(true);
+    serde_json::json!({
+        "baseline_snapshot": s(old, &["snapshot", "id"]),
+        "current_snapshot": s(new, &["snapshot", "id"]),
+        "has_changes": has_changes,
+        "counts": {
+            "added": added, "removed": removed, "changed": changed,
+            "ui_nodes": { "before": om.len(), "after": nm.len() },
+            "scenes": { "before": o_sc.len(), "after": n_sc.len() },
+            "transitions_listed": transitions.len()
+        },
+        "transitions": transitions,
+        "visual_changed": visual_changed,
+        "page": page_diff,
+        "observations": [
+            {"source": "observed", "value": "two full semantic snapshots compared (A=baseline before action, B=current)"},
+            {"source": "inferred", "value": "temporal adjacency only: transitions were observed AFTER your last action — timing suggests but does not prove causation"}
+        ],
+        "provenance": "observed A/B snapshots + inferred causal timing",
+        "note": "with update_baseline=true the baseline now equals B — call page_semantic before your next action only if you want to re-arm explicitly; the next diff compares against this state"
+    })
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -4621,11 +4831,36 @@ impl GhostcloakServer {
             max_nodes,
         }): Parameters<SemanticParams>,
     ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+                let v = self
+            .take_semantic(&session_id, &page_id, max_nodes)
+            .await?;
+        // Every baseline-setting semantic read refreshes the per-page store
+        // that page_semantic_diff compares against.
+        {
+            let mut st = self.state.write().await;
+            st.semantic_baselines.insert(page_id.clone(), v.clone());
+        }
+        let _ = self.recorder.record(
+            &session_id,
+            "page_semantic",
+            Some(&page_id),
+            serde_json::json!({ "max_nodes": max_nodes.unwrap_or(400) }),
+        );
+        Ok(text_result(v.to_string()))
+    }
+
+    /// Shared snapshot pipeline: node walk + async scene pass. No baseline, no recorder.
+    async fn take_semantic(
+        &self,
+        session_id: &str,
+        page_id: &str,
+        max_nodes: Option<u32>,
+    ) -> Result<serde_json::Value, rmcp::model::ErrorData> {
         let expr = SEMANTIC_JS.replace("@@MAX@@", &max_nodes.unwrap_or(400).to_string());
         let r = self
             .page_eval(Parameters(PageEvalParams {
-                session_id: session_id.clone(),
-                page_id: page_id.clone(),
+                session_id: session_id.to_string(),
+                page_id: page_id.to_string(),
                 expression: expr,
             }))
             .await?;
@@ -4636,8 +4871,8 @@ impl GhostcloakServer {
         // Kept out of the node walk so an await can never stall the sync traversal.
         let rs = self
             .page_eval(Parameters(PageEvalParams {
-                session_id: session_id.clone(),
-                page_id: page_id.clone(),
+                session_id: session_id.to_string(),
+                page_id: page_id.to_string(),
                 expression: SCENE_JS.to_string(),
             }))
             .await?;
@@ -4651,14 +4886,67 @@ impl GhostcloakServer {
                 v["scene_summary"] = serde_json::json!({});
             }
         }
+        Ok(v)
+    }
+
+    #[tool(
+        description = "STATE-TRANSITION OBSERVER — the 'observe -> update world model' step of \
+        the action loop. Compares the CURRENT semantic snapshot against the per-page baseline \
+        stored by the last page_semantic/page_semantic_diff call and returns only what moved: \
+        transitions[] {type: added|removed|changed, id, name, role, surface, changes: [{field, \
+        from, to}]} over state flags (visible/enabled/checked/expanded/...), semantic text/name, \
+        input values, geometry (>2px), plus visual_changed[] (canvas pixel payload deltas, scene \
+        visibility/kind) and page url/title changes. Causal timing is explicitly labeled as \
+        INFERENCE (temporal adjacency, not proof). update_baseline=true (default) advances the \
+        baseline to B so the next diff observes the next step. Errors if no baseline exists — \
+        call page_semantic before acting to arm it."
+    )]
+    async fn page_semantic_diff(
+        &self,
+        Parameters(SemanticDiffParams {
+            session_id,
+            page_id,
+            max_nodes,
+            update_baseline,
+        }): Parameters<SemanticDiffParams>,
+    ) -> Result<CallToolResult, rmcp::model::ErrorData> {
+        let new = self
+            .take_semantic(&session_id, &page_id, max_nodes)
+            .await?;
+        let old = {
+            let st = self.state.read().await;
+            st.semantic_baselines.get(&page_id).cloned()
+        };
+        let old = match old {
+            Some(o) => o,
+            None => {
+                return Err(rmcp::model::ErrorData::invalid_params(
+                    format!(
+                        "no semantic baseline for page {page_id} — call page_semantic before acting to arm the baseline"
+                    ),
+                    None,
+                ))
+            }
+        };
+        let delta = semantic_delta(&old, &new);
+        if update_baseline.unwrap_or(true) {
+            let mut st = self.state.write().await;
+            st.semantic_baselines.insert(page_id.clone(), new.clone());
+        }
         let _ = self.recorder.record(
             &session_id,
-            "page_semantic",
+            "page_semantic_diff",
             Some(&page_id),
-            serde_json::json!({ "max_nodes": max_nodes.unwrap_or(400) }),
+            serde_json::json!({
+                "has_changes": delta["has_changes"],
+                "added": delta["counts"]["added"],
+                "removed": delta["counts"]["removed"],
+                "changed": delta["counts"]["changed"],
+            }),
         );
-        Ok(text_result(v.to_string()))
+        Ok(text_result(delta.to_string()))
     }
+
 
     #[tool(
         description = "SEMANTIC QUERY — search the semantic world model (page_semantic snapshot) by \

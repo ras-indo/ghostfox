@@ -161,7 +161,7 @@ pub fn dom_click_variant_js(selector: &str, button: u8, count: u8) -> String {
          const r = el.getBoundingClientRect(); \
          const x = r.x + r.width/2, y = r.y + r.height/2; \
          const mk = (type, b, detail, buttons) => new MouseEvent(type, \
-           {{bubbles:true, cancelable:true, composed:true, view:window, \
+           {{bubbles:true, cancelable:true, composed:true, \
              clientX:x, clientY:y, button:b, buttons:buttons, detail:detail}}); \
          if ({btn} === 2) {{ \
            el.dispatchEvent(mk('mousedown',2,1,2)); \

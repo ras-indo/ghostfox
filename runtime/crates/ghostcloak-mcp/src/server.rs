@@ -1345,10 +1345,7 @@ fn node_matches(n: &serde_json::Value, field: &str, op: &str, val: &str) -> bool
         "id" => scalar_match(str_field(n, &["id"]), op, val),
         "action" => n["actions"]
             .as_array()
-            .map(|acts| {
-                acts.iter()
-                    .any(|a| a["type"].as_str().unwrap_or("") == val)
-            })
+            .map(|acts| acts.iter().any(|a| a["type"].as_str().unwrap_or("") == val))
             .unwrap_or(false),
         "visible" | "enabled" | "disabled" | "checked" | "selected" | "expanded" | "pressed" => {
             let want = val == "true" || val == "1";
@@ -4503,10 +4500,7 @@ impl GhostcloakServer {
         if let Some(nodes) = v["ui_nodes"].as_array() {
             snapshot_n = nodes.len();
             for n in nodes {
-                if clauses
-                    .iter()
-                    .all(|(f, o, val)| node_matches(n, f, o, val))
-                {
+                if clauses.iter().all(|(f, o, val)| node_matches(n, f, o, val)) {
                     total += 1;
                     if matched.len() < limit_n {
                         matched.push(n.clone());
@@ -4610,10 +4604,7 @@ impl GhostcloakServer {
                     s += 0.2;
                 }
                 if let Some(acts) = n["actions"].as_array() {
-                    if acts
-                        .iter()
-                        .any(|a| a["type"].as_str().unwrap_or("") == act)
-                    {
+                    if acts.iter().any(|a| a["type"].as_str().unwrap_or("") == act) {
                         s += 0.15;
                     }
                 }

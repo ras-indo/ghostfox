@@ -1251,10 +1251,10 @@ struct ActionGroundParams {
 }
 
 /// Extract the first text payload from a tool result (page_semantic returns JSON text).
-/// rmcp 0.3: Content = Annotated<RawContent>; match the flattened RawContent::Text.
+/// rmcp 0.3: Content = Annotated<RawContent> (Deref<Target=RawContent>) — match through it.
 fn result_text(r: &CallToolResult) -> String {
     for c in &r.content {
-        if let rmcp::model::RawContent::Text(t) = &c.content {
+        if let rmcp::model::RawContent::Text(t) = &**c {
             return t.text.clone();
         }
     }

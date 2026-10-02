@@ -319,8 +319,8 @@ instruction order. Live-recon'd on bilibili login (production GeeTest):
    - LOCAL CONTRAST MAP (high-pass: |pixel - gaussian_blur|) makes the
      characters VISIBLE against any photo (the breakthrough — global
      luminance/hue/correlation all failed on dark instances).
-   - The ocrs text-DETECTION model (page_vision) finds stroke clusters
-     in the field (candidate localizer).
+   - The `page_pixels` luminance grid finds stroke clusters in the
+     field (candidate localizer — pure pixel math, no model).
    - Instruction glyphs: crop (600-736, 193-243 CSS) from a viewport
      screenshot; ~25px each; lighter strokes on dark strip.
 4. **REMAINING**: multi-scale normalized cross-correlation of binarized
@@ -553,12 +553,9 @@ ground for challenge-tier accuracy.
 Every family now has a native MCP tool in ghostcloak-mcp (no Python in
 the solve path — Python stays only as the R&D lab):
 
-| tool | family | engine |
+| tool | family | status |
 |---|---|---|
-| page_geetest_click | icon-click 文字点选 | rten: yolov8s + siamese_float (dequantized) |
-| page_geetest_slide | v3 slide | pure pixel math in Rust: bg-fullbg diff > 40 + closing 5x5 + largest blob (BFS) = hole; slice alpha>128 = piece; drag = hx0 - px0. Does the human drag itself |
-| page_captcha_rotate | rotate | JS sweep (instant .click()s, reads feedback per angle) + HUMAN REPLAY of the winner via drag_ref. Re-resolve refs before replay: the sweep re-renders the page (React) and stale refs fail a11y validation |
-| page_captcha_ocr | normal text captcha | ddddocr model on ort (rten has no LSTM importer). w9h5k first-try |
+| page_geetest_click / page_geetest_slide / page_captcha_rotate / page_captcha_ocr | icon-click / slide / rotate / normal text captcha | **Removed** (2026-10): model stack gone (rten/ort/ddddocr/YOLO); generic tools only. Knowledge below kept for reference. |
 
 Port gotchas (cost real hours):
 1. ddddocr output is [T, 1, C] sequence-major, NOT [1, T, C].
@@ -708,14 +705,13 @@ the end state.
 5. Same rten 0.26 runtime runs the GeeTest YOLO model flawlessly (pixel-precise
    drag solves) → not a broken runtime, an ocrs-model × aarch64 numeric issue.
 
-**What still uses local ML (unchanged, accurate):**
-- `page_captcha_ocr` / `captcha_solve` — ddddocr ONNX (proved against vision:
-  both read `w9h5k`).
-- `page_vision` — ocrs *detection* boxes remain plausible (detection layer
-  behaves; only recognition is scrambled).
+**Local ML: removed.** The gateway runs zero model inference now — the
+ddddocr/ocrs/YOLO ONNX stack (and `ort`/`rten` deps) were dropped along
+with the captcha solver tools. Everything above is pixel math; reading
+returned PNGs is the CALLER's vision job.
 
 **To restore native OCR later:** swap the engine behind the same contract
-(`ocr_png` in `src/ocr.rs`), e.g. PaddleOCR ONNX models through rten, or a
+(the old `ocr_png` in `src/ocr.rs` is gone), e.g. PaddleOCR ONNX through rten, or a
 pinned rten/ocrs pair that behaves on aarch64. The tool contract does not
 change: once `ocr_png` returns sane text again, flip the handler back from
 file-delegation to text output.

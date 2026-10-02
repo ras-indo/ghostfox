@@ -56,18 +56,13 @@ Firefox (MPL-2.0)
 ships native MCP solvers with local models — no paid captcha farms, no
 cloud, no browser rent:
 
-| Family | Native tool | How |
-|---|---|---|
-| GeeTest slide / v4 radar | `page_geetest_slide` | bg-vs-fullbg diff + largest-blob gap detection |
-| GeeTest icon-click (文字点选) | `page_geetest_click` | custom-trained YOLOv8s + siamese similarity (rten, CPU) |
-| Rotate | `page_captcha_rotate` | 24-angle sweep + programmatic verdict |
-| Normal OCR | `page_captcha_ocr` | ported ddddocr (CRNN+LSTM, onnxruntime) |
-| hCaptcha | `page_hcaptcha` | layout router + 553-model QIN2DIM zoo + optional vision-model ensemble |
-| Cloudflare Turnstile / TikTok | `captcha_solve` + behavioral recipes | proven playbooks in `AGENTS.md` §6b–6e |
+| Family | Status |
+|---|---|
+| Captcha solvers (GeeTest / rotate / OCR / hCaptcha / Turnstile) | **Removed** — no model inference in the gateway; solve interactively with the generic tools (`page_click`, `page_drag`, `page_pixels`, `page_ocr` + caller vision) |
 
-E2E-verified against production sites (not vendor demos): bilibili
-icon-click ×6 "Verification Succeeded", hCaptcha on real signups
-(dashboard.hcaptcha.com, dosya.co), TikTok OAuth+OTP live session.
+(The removed solvers were once E2E-verified against production sites —
+bilibili icon-click, hCaptcha signups, TikTok OAuth+OTP — historical
+note only; those tools no longer exist.)
 
 **Debug cortex — page tools that tell you WHY (v0.7).** Agents stop
 guessing when a page misbehaves:
@@ -78,11 +73,10 @@ guessing when a page misbehaves:
 
 That's the DevTools trio, exposed over MCP.
 
-**Multi-model vision (optional).** `page_vision` + `page_ocr` +
-`page_match_image` + `page_pixels` + `page_contrast` — wire any
-vision-capable model (Cloudflare Workers AI, GLM, Qwen, ...) as
-cross-checks for grid puzzles and layout questions. Keys are optional;
-the native solvers above run fully local.
+**Vision toolkit (no local ML).** `page_ocr` + `page_match_image` +
+`page_pixels` + `page_contrast` — pure pixel math in-page; read the
+returned PNG with whatever vision the CALLER already has. The gateway
+runs zero model inference of its own (no ONNX/YOLO/ddddocr stack).
 
 **Eyes for agents — `page_a11y`.** One call returns every visible interactive
 element with a stable ref, semantic role, accessible name, live value —
@@ -178,9 +172,8 @@ systems revoke it. Proven flow, see `AGENTS.md` §8.
 | **See** | `page_a11y` (semantic + login_state + shadow DOM/iframe) · `page_snapshot` · `page_screenshot` (inline image + file) · `page_read_ref` (full value) |
 | **Wait** | `page_wait_for` (poll for a selector) · `page_wait_for_text` (poll for content) · `page_wait_rate_limit` (wait out throttling) · `page_dismiss_modal` |
 | **Act** | `page_click_ref` · `page_type_ref` · `page_click` (±`button:"right"` contextmenu, `click_count:2` double-click — real mouse events) · `page_type` · `page_fill` · `page_press` · `page_drag` · `page_move_to` · `page_upload_file` · `page_init_script` |
-| **Captcha** | `captcha_solve` · `page_geetest_slide` · `page_geetest_click` · `page_captcha_rotate` · `page_captcha_ocr` · `page_hcaptcha` |
 | **Debug** | `page_console` · `page_errors` · `page_network_start` · `page_network_read` · `page_network_body` |
-| **Vision** | `page_vision` · `page_ocr` · `page_match_image` · `page_pixels` · `page_contrast` |
+| **Vision** | `page_ocr` · `page_match_image` · `page_pixels` · `page_contrast` |
 | **Inspect** | `page_eval` (one expression) · `browser_exec` (full program + queued goto/click/new_tab, persistent `ns`) · `page_open` · `page_comment` |
 | **Identity** | `identity_generate` · `identity_audit` |
 | **Evidence & safety** | `session_evidence` · `confirm_action` |
